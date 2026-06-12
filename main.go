@@ -62,7 +62,7 @@ func getConfigPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "myeditor", "config.json")
+	return filepath.Join(home, ".config", "jigedit", "config.json")
 }
 
 func LoadConfig() Config {
