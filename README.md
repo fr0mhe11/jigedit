@@ -1,3 +1,4 @@
+[README(1).md](https://github.com/user-attachments/files/28876502/README.1.md)
 
 # JigEdit
 
@@ -31,15 +32,51 @@ As the discription implies, **jigedit** aims to be a simple and modern terminal-
 
 ## Installation
 
-Install jigedit on linux **(recommended)** :
+### Install jigedit on linux **(recommended)** :
 
 ```bash
 curl -sL https://raw.githubusercontent.com/fr0mhe11/jigedit/main/install.sh | bash
 ```
 
-install via ```go install``` :
+### install via ```go install``` :
 
 ```bash
 go install github.com/fr0mhe11/jigedit@latest
 ```
 
+
+### to uninstall (curl)
+
+```bash
+# 1. remove program file
+sudo rm /usr/local/bin/jigedit
+
+# 2. remove settings file (optional)
+rm -rf ~/.config/jigedit
+```
+
+## ⚠️ Dependencies
+
+
+this program uses `zenity` and `xclip`, thus these two will be installed on your computer when installing jigedit.
+
+to remove those dependencies after uninstalling this program, run: 
+
+
+⚠️ ⚠️ ⚠️  **warning!** remove these two at your own risk! 
+
+**Ubuntu / Debian:**
+```bash
+sudo apt-get remove --autoremove zenity xclip
+```
+
+**Arch Linux:**
+```bash.
+sudo pacman -Rns zenity xclip
+```
+
+**Fedora / RHEL:**
+```bash
+sudo dnf remove zenity xclip
+sudo dnf autoremove
+```
