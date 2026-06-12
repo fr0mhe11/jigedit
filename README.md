@@ -1,5 +1,4 @@
 
-
 # JigEdit
 
 "A Sane Editor For The Sane People"
@@ -10,8 +9,9 @@ As the discription implies, **jigedit** aims to be a simple and modern terminal-
 
 ![image](https://github.com/fr0mhe11/jigedit/blob/main/images/jigbanner2.png?raw=true)
 
+heres a picture of jigeditor editing it's own code
 
-
+![image](https://github.com/fr0mhe11/jigedit/blob/main/images/jigscreen2.png?raw=true)
 
 
 
