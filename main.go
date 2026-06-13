@@ -53,7 +53,7 @@ func DefaultConfig() Config {
 		HighlightLine:   true,
 		OverlapSearch:   false,
 		AutoIndent:      true,
-		LineWrappingCap: 20000,
+		LineWrappingCap: 0,
 	}
 }
 
@@ -322,6 +322,8 @@ encodeBtnX1 int
 	savedTotalChars int
 	syncTimer       *time.Timer
 	contentMutex    sync.Mutex
+
+	stickToWrapEnd  bool
 }
 type PaletteItem struct {
 	Name     string
@@ -1150,7 +1152,13 @@ func (b *Buffer) getVCursorIdx(cfg Config) int {
 	for i, vl := range b.cachedVLines {
 		if vl.lineIdx == b.cursor.L {
 			if b.cursor.C >= vl.startCX && b.cursor.C <= vl.endCX {
-				if b.cursor.C == vl.endCX && i+1 < len(b.cachedVLines) && b.cachedVLines[i+1].lineIdx == b.cursor.L { continue }
+				// 💡 [버그 완벽 수정] End 키나 마우스 클릭으로 윗줄 끝을 가리킨 경우 다음 줄로 넘어가지 않음
+				if b.cursor.C == vl.endCX && i+1 < len(b.cachedVLines) && b.cachedVLines[i+1].lineIdx == b.cursor.L {
+					if b.stickToWrapEnd {
+						return i
+					}
+					continue
+				}
 				return i
 			}
 		}
@@ -1172,7 +1180,6 @@ func (b *Buffer) getCursorVisualRange(cfg Config) (int, int) {
 	b.cursor = b.clampLoc(b.cursor)
 	line := b.lines[b.cursor.L]
 
-	// 1. Calculate cursor visual X
 	cursorVisX := 0
 	for i := 0; i < b.cursor.C && i < len(line); i++ {
 		r := line[i]
@@ -1181,69 +1188,70 @@ func (b *Buffer) getCursorVisualRange(cfg Config) (int, int) {
 		cursorVisX += rw
 	}
 
-	startVisX := cursorVisX
-	endVisX := cursorVisX
-
-	// 2. If there's an active selection/match on the current line, expand visual boundaries
-	if b.isSelecting {
-		selStart, selEnd := b.getSelectionRange()
-		if selStart.L == b.cursor.L || selEnd.L == b.cursor.L {
-			startCX := b.cursor.C
-			endCX := b.cursor.C
-
-			if selStart.L == b.cursor.L {
-				startCX = selStart.C
-			} else {
-				startCX = 0
-			}
-
-			if selEnd.L == b.cursor.L {
-				endCX = selEnd.C
-			} else {
-				endCX = len(line)
-			}
-
-			vStart := 0
-			for i := 0; i < startCX && i < len(line); i++ {
-				r := line[i]
-				rw := runewidth.RuneWidth(r)
-				if r == '\t' { rw = cfg.TabSize }
-				vStart += rw
-			}
-
-			vEnd := 0
-			for i := 0; i < endCX && i < len(line); i++ {
-				r := line[i]
-				rw := runewidth.RuneWidth(r)
-				if r == '\t' { rw = cfg.TabSize }
-				vEnd += rw
-			}
-
-			startVisX = vStart
-			endVisX = vEnd
-		}
+	// 💡 [한글 버그 수정] 커서 위치에 있는 글자의 픽셀 너비(1칸 or 2칸)를 가져옵니다.
+	charWidth := 1
+	if b.cursor.C < len(line) {
+		r := line[b.cursor.C]
+		charWidth = runewidth.RuneWidth(r)
+		if r == '\t' { charWidth = cfg.TabSize }
 	}
-
-	return startVisX, endVisX
+	
+	// 글자의 시작점과 '끝점'을 반환하여 한글 2칸 전체가 화면에 들어오게 보장합니다.
+	return cursorVisX, cursorVisX + charWidth
 }
 
 func (b *Buffer) scrollToCursorH(textMaxWidth int, cfg Config) {
 	if textMaxWidth <= 0 { return }
-	startVisX, endVisX := b.getCursorVisualRange(cfg)
+	b.cursor = b.clampLoc(b.cursor)
 
-	if endVisX >= b.hOffset+textMaxWidth {
-		b.hOffset = endVisX - textMaxWidth + 1
+	// 1. 현재 커서가 화면에서 몇 번째 '시각적인 줄(Visual Line)'에 위치하는지 찾습니다.
+	vIdx := b.getVCursorIdx(cfg)
+	vl := b.getVisualLine(vIdx, cfg)
+
+	line := b.lines[vl.lineIdx]
+	cursorVisX := 0
+	
+	// 2. 물리적 줄의 처음이 아니라, 화면에 꺾여서 표시된 '현재 줄의 맨 앞'을 기준으로 커서 거리를 정밀 계산합니다.
+	for i := vl.startCX; i < b.cursor.C && i < vl.endCX && i < len(line); i++ {
+		r := line[i]
+		rw := runewidth.RuneWidth(r)
+		if r == '\t' { rw = cfg.TabSize }
+		cursorVisX += rw
+	}
+
+	charWidth := 1
+	if b.cursor.C < len(line) && b.cursor.C >= vl.startCX && b.cursor.C < vl.endCX {
+		r := line[b.cursor.C]
+		charWidth = runewidth.RuneWidth(r)
+		if r == '\t' { charWidth = cfg.TabSize }
+	}
+
+	startVisX := cursorVisX
+	endVisX := cursorVisX + charWidth
+
+	// 💡 [핵심 버그 수정] 강제 0 스냅(옵션 C) 폐기 및 물리 법칙 보정!
+	// 랩핑된 줄(짧은 줄)은 구조상 텍스트가 화면 우측(textMaxWidth)을 물리적으로 뚫고 나갈 수 없습니다.
+	// 벽에 딱 맞닿았을 때 커서 두께(charWidth) 때문에 가로 스크롤이 1칸씩 밀리며 덜컹거리는 버그를 원천 차단합니다.
+	if !b.isLineUnwrapped(vl.lineIdx, cfg) {
+		if endVisX > textMaxWidth {
+			endVisX = textMaxWidth
+		}
+	}
+
+	// 3. 계산된 커서 위치가 현재 스크롤(hOffset) 밖으로 나갔을 때만 부드럽게 화면을 당겨옵니다.
+	if endVisX > b.hOffset+textMaxWidth {
+		b.hOffset = endVisX - textMaxWidth
 	}
 	if startVisX < b.hOffset {
 		b.hOffset = startVisX
 	}
 }
-
+// 마우스 클릭 시 화면 좌표를 실제 데이터 좌표(Loc)로 변환
 // 마우스 클릭 시 화면 좌표를 실제 데이터 좌표(Loc)로 변환
 func (b *Buffer) screenToMemoryPosV(vLines []VisualLine, mx, my, tabHeight int, cfg Config) Loc {
 	lineNumWidth := b.getLineNumWidth(cfg)
 	
-	if len(vLines) == 0 || len(b.lines) == 0 { return Loc{0, 0} } // 💡 방어 코드: 버퍼가 비어있을 때
+	if len(vLines) == 0 || len(b.lines) == 0 { return Loc{0, 0} } 
 	
 	targetVIdx := b.vOffsetIdx + (my - tabHeight)
 	if targetVIdx >= len(vLines) { targetVIdx = len(vLines) - 1 }
@@ -1251,7 +1259,6 @@ func (b *Buffer) screenToMemoryPosV(vLines []VisualLine, mx, my, tabHeight int, 
 
 	vl := vLines[targetVIdx]
 	
-	// 💡 핵심 방어: 삭제 키 연타 등으로 인해 화면 캐시가 예전 줄을 가리키고 있을 경우 (Stale Cache 에러 방지)
 	if vl.lineIdx >= len(b.lines) {
 		lastL := len(b.lines) - 1
 		return Loc{lastL, len(b.lines[lastL])}
@@ -1263,17 +1270,25 @@ func (b *Buffer) screenToMemoryPosV(vLines []VisualLine, mx, my, tabHeight int, 
 	currentX := 0
 	line := b.lines[vl.lineIdx]
 	
-	// 💡 i < len(line) 검사 추가: 줄 길이가 짧아졌을 때 접근 차단
 	for i := vl.startCX; i < vl.endCX && i < len(line); i++ {
 		r := line[i]
 		rw := runewidth.RuneWidth(r)
 		if r == '\t' { rw = cfg.TabSize }
-		if currentX+rw/2 >= relativeX { return Loc{vl.lineIdx, i} }
+		
+		// 💡 [한글 버그 완벽 수정] 마우스 클릭이 글자의 범위 안에 들어올 때
+		if relativeX >= currentX && relativeX < currentX+rw {
+			// 한글(2칸)의 오른쪽 절반을 클릭했다면, 커서를 현재 글자 뒤(i+1)로 이동시킵니다.
+			if rw > 1 && relativeX >= currentX+(rw/2)+(rw%2) {
+				return Loc{vl.lineIdx, i + 1}
+			}
+			// 왼쪽 절반을 클릭했으면 글자 앞(i)으로 이동
+			return Loc{vl.lineIdx, i}
+		}
 		currentX += rw
 	}
 	
 	endC := vl.endCX
-	if endC > len(line) { endC = len(line) } // 💡 끝 좌표 보정
+	if endC > len(line) { endC = len(line) }
 	return Loc{vl.lineIdx, endC}
 }
 
@@ -1347,7 +1362,7 @@ if e.needsFullRefresh || w != e.prevW || h != e.prevH {
 			if x >= 0 && x < w && y >= 0 && y < h { e.nextCache[y][x] = cellState{mainc: r, comb: comb, style: style} }
 		}
 
-		if e.cfg.LineWrapping && !b.isLineUnwrapped(b.cursor.L, e.cfg) { b.hOffset = 0 }
+		
 		lineNumWidth := b.getLineNumWidth(e.cfg)
 		textMaxWidth := w - lineNumWidth
 		if textMaxWidth <= 0 { textMaxWidth = 1 }
@@ -1434,8 +1449,11 @@ if e.needsFullRefresh || w != e.prevW || h != e.prevH {
 					rw := runewidth.RuneWidth(r)
 					if r == '\t' { rw = e.cfg.TabSize }
 
-					if lineIdx == b.cursor.L && i == b.cursor.C {
-						cursorVX = lineNumWidth + currentX - b.hOffset; cursorVY = currentRenderY
+				if lineIdx == b.cursor.L && i == b.cursor.C {
+						// 💡 [버그 완벽 수정] 윗줄 끝에 머물기로 한 경우, 아랫줄의 첫 글자가 커서 위치를 덮어쓰지 않도록 보호!
+						if !(b.stickToWrapEnd && i == vl.startCX && vIdx > 0 && vLines[vIdx-1].lineIdx == b.cursor.L) {
+							cursorVX = lineNumWidth + currentX - b.hOffset; cursorVY = currentRenderY
+						}
 					}
 
 					charStyle := lineStyle
@@ -1456,16 +1474,30 @@ if e.needsFullRefresh || w != e.prevW || h != e.prevH {
 						if selected { charStyle = selectedStyle }
 					}
 
-					if currentX >= b.hOffset && currentX < b.hOffset+textMaxWidth {
+					// 💡 [한글 버그 수정] 한글의 왼쪽이나 오른쪽 절반만 화면에 걸칠 때를 정밀 처리
+					if currentX+rw > b.hOffset && currentX < b.hOffset+textMaxWidth {
 						if r == '\t' {
 							for tx := 0; tx < rw; tx++ {
-								if currentX+tx >= b.hOffset && currentX+tx < b.hOffset+textMaxWidth { setCell(lineNumWidth+currentX+tx-b.hOffset, currentRenderY, ' ', nil, charStyle) }
+								if currentX+tx >= b.hOffset && currentX+tx < b.hOffset+textMaxWidth { 
+									setCell(lineNumWidth+currentX+tx-b.hOffset, currentRenderY, ' ', nil, charStyle) 
+								}
 							}
-						} else { setCell(lineNumWidth+currentX-b.hOffset, currentRenderY, r, nil, charStyle) }
+						} else {
+							drawX := lineNumWidth + currentX - b.hOffset
+							if drawX < lineNumWidth {
+								// 글자의 왼쪽 절반이 스크롤 밖으로 짤려나간 경우
+								setCell(lineNumWidth, currentRenderY, ' ', nil, charStyle)
+							} else {
+								// 정상적으로 화면 안에 들어오는 경우
+								setCell(drawX, currentRenderY, r, nil, charStyle)
+							}
+						}
 					}
+					// 💡 [에러 원인 해결] 지워졌던 X좌표 누적과 반복문 닫는 괄호를 복구했습니다!
 					currentX += rw
 				}
 
+				// 💡 [에러 원인 해결] 지워졌던 '줄 끝부분 선택 영역' 하이라이트 코드를 복구했습니다!
 				if !vl.isWrapped || vl.endCX == len(lineData) {
 					if hasSel {
 						selected := false
@@ -1481,33 +1513,58 @@ if e.needsFullRefresh || w != e.prevW || h != e.prevH {
 				}
 
 				if lineIdx == b.cursor.L && b.cursor.C == vl.endCX {
-					if b.cursor.C == len(lineData) || vIdx+1 >= len(vLines) || vLines[vIdx+1].lineIdx != b.cursor.L {
+					// 💡 [버그 완벽 수정] stickToWrapEnd가 켜져있으면 강제로 윗줄 끝에 커서를 그립니다!
+					if b.cursor.C == len(lineData) || vIdx+1 >= len(vLines) || vLines[vIdx+1].lineIdx != b.cursor.L || b.stickToWrapEnd {
 						cursorVX = lineNumWidth + currentX - b.hOffset; cursorVY = currentRenderY
 					}
 				}
 
 				// 💡 Left/Right scroll indicators for unwrapped lines
-				if b.isLineUnwrapped(lineIdx, e.cfg) {
+			// 💡 [핵심 UX 개선] 랩핑 여부와 상관없이, 현재 '시각적 줄(Visual Line)' 구간의 실제 픽셀 길이를 계산
+				vlWidth := 0
+				for i := vl.startCX; i < vl.endCX; i++ {
+					r := lineData[i]
+					rw := runewidth.RuneWidth(r)
+					if r == '\t' { rw = e.cfg.TabSize }
+					vlWidth += rw
+				}
+
+				// 화면 스크롤(hOffset)로 인해 텍스트가 왼쪽이나 오른쪽으로 가려졌는지 공간 기반으로 완벽히 판별
+				showLeftIndicator := b.hOffset > 0 && vlWidth > 0
+				showRightIndicator := vlWidth > b.hOffset+textMaxWidth
+
+				if showLeftIndicator || showRightIndicator {
 					indicatorStyle := lineStyle.Foreground(tcell.ColorDarkCyan).Bold(true)
-					if b.hOffset > 0 {
-						if lineNumWidth > 0 {
-							setCell(lineNumWidth-1, currentRenderY, '<', nil, indicatorStyle)
-						} else {
-							setCell(0, currentRenderY, '<', nil, indicatorStyle)
+
+					// 왼쪽 '<' 표시기 처리
+					if showLeftIndicator {
+						indX := lineNumWidth - 1
+						if lineNumWidth <= 0 { indX = 0 }
+						
+						if indX >= 0 && indX < w {
+							if runewidth.RuneWidth(e.nextCache[currentRenderY][indX].mainc) == 2 {
+								setCell(indX, currentRenderY, ' ', nil, lineStyle)
+								if indX+1 < w { setCell(indX+1, currentRenderY, ' ', nil, lineStyle) }
+							}
 						}
+						setCell(indX, currentRenderY, '<', nil, indicatorStyle)
 					}
-					// Calculate total visual width of this line
-					totalWidth := 0
-					for _, r := range lineData {
-						rw := runewidth.RuneWidth(r)
-						if r == '\t' { rw = e.cfg.TabSize }
-						totalWidth += rw
-					}
-					if totalWidth > b.hOffset+textMaxWidth {
+
+					// 오른쪽 '>' 표시기 처리
+					if showRightIndicator {
+						if w-2 >= 0 {
+							if runewidth.RuneWidth(e.nextCache[currentRenderY][w-2].mainc) == 2 {
+								setCell(w-2, currentRenderY, ' ', nil, lineStyle)
+							}
+						}
+						if w-1 >= 0 {
+							if runewidth.RuneWidth(e.nextCache[currentRenderY][w-1].mainc) == 2 {
+								setCell(w-1, currentRenderY, ' ', nil, lineStyle)
+							}
+						}
 						setCell(w-1, currentRenderY, '>', nil, indicatorStyle)
 					}
 				}
-
 				currentRenderY++
 			}
 
@@ -2377,10 +2434,14 @@ func main() {
 					needsLayout = false
 				}
 
-				if snapToCursor && !editor.paletteActive && !editor.ctxMenuActive && !editor.encodeMenuActive && !currentScreen.HasPendingEvent() {
+			if snapToCursor && !editor.paletteActive && !editor.ctxMenuActive && !editor.encodeMenuActive && !currentScreen.HasPendingEvent() {
 					b.scrollToCursorV(editor.cfg, h-editor.tabHeight-1)
 					textMaxWidth := w - b.getLineNumWidth(editor.cfg)
-					if !editor.cfg.LineWrapping || b.isLineUnwrapped(b.cursor.L, editor.cfg) { b.scrollToCursorH(textMaxWidth, editor.cfg) } else { b.hOffset = 0 }
+					
+					// 💡 [버그 수정] 줄바꿈 상태와 관계없이 무조건 스크롤 추적 엔진을 사용합니다!
+					// 기존에 있던 else { b.hOffset = 0 } 코드를 삭제했습니다.
+					b.scrollToCursorH(textMaxWidth, editor.cfg)
+					
 					snapToCursor = false
 				}
 
@@ -2564,8 +2625,78 @@ func main() {
 						}
 
 						if buttons&tcell.Button1 != 0 {
+							// 💡 [버그 수정 및 스크롤 편의성 개선] 클릭과 '드래그 유지' 상태 모두 감지
+							// 💡 [버그 수정 및 스크롤 편의성 개선] 클릭과 '드래그 유지' 상태 모두 감지
+							isIndicatorEvent := false
+							if !outOfBounds {
+								targetVIdx := b.vOffsetIdx + (my - editor.tabHeight)
+								if targetVIdx >= 0 && targetVIdx < b.getVisualLineCount(editor.cfg) {
+									vl := b.getVisualLine(targetVIdx, editor.cfg)
+									lineIdx := vl.lineIdx
+									
+									// 💡 [핵심 UX 개선] 클릭 로직도 랩핑 여부가 아닌 실제 공간 너비(vlWidth) 기반으로 통합
+									lineNumWidth := b.getLineNumWidth(editor.cfg)
+									textMaxWidth := w - lineNumWidth
+									if textMaxWidth <= 0 { textMaxWidth = 1 }
+
+									vlWidth := 0
+									for i := vl.startCX; i < vl.endCX; i++ {
+										r := b.lines[lineIdx][i]
+										rw := runewidth.RuneWidth(r)
+										if r == '\t' { rw = editor.cfg.TabSize }
+										vlWidth += rw
+									}
+
+									// 1. 왼쪽 '<' 영역 클릭 감지
+									leftIndX := lineNumWidth - 1
+									if lineNumWidth == 0 { leftIndX = 0 }
+									if b.hOffset > 0 && vlWidth > 0 && mx <= leftIndX+1 {
+										isIndicatorEvent = true
+										if isNewPress || isDrag {
+											b.hOffset -= 5
+											if b.hOffset < 0 { b.hOffset = 0 }
+										}
+									}
+
+									// 2. 오른쪽 '>' 영역 클릭 감지
+									if !isIndicatorEvent {
+										if vlWidth > b.hOffset+textMaxWidth && mx >= w-2 {
+											isIndicatorEvent = true
+											if isNewPress || isDrag {
+												b.hOffset += 5
+												if b.hOffset+textMaxWidth > vlWidth {
+													b.hOffset = vlWidth - textMaxWidth + 1
+												}
+											}
+										}
+									}
+								}
+							}
+
+							if isIndicatorEvent {
+								needsLayout = true
+								snapToCursor = false 
+								continue // 💡 인디케이터를 조작할 때는 아래의 텍스트 선택/커서 이동 로직으로 넘어가지 않음!
+							}
+							// --- 기존 커서 클릭/드래그 처리 로직 ---
 							loc := b.screenToMemoryPosV(cachedVLines, mx, my, editor.tabHeight, editor.cfg)
+							// 💡 [버그 완벽 수정] 마우스로 랩핑된 줄의 오른쪽 빈 공간이나 마지막 글자를 클릭했을 때 윗줄에 고정
+							targetVIdx := b.vOffsetIdx + (my - editor.tabHeight)
+							if targetVIdx >= 0 && targetVIdx < len(cachedVLines) {
+								vl := cachedVLines[targetVIdx]
+								if loc.L == vl.lineIdx && loc.C == vl.endCX && vl.endCX < len(b.lines[vl.lineIdx]) {
+									b.stickToWrapEnd = true
+								} else {
+									b.stickToWrapEnd = false
+								}
+							} else {
+								b.stickToWrapEnd = false
+							}
+
 							if isNewPress && outOfBounds { continue }
+
+							
+								// 이 아래는 기존에 있던 now := time.Now() 코드가 이어집니다.
 
 							if isNewPress {
 								now := time.Now()
@@ -2600,7 +2731,13 @@ func main() {
 							isAlt := (ev.Modifiers() & tcell.ModAlt) != 0
 							snapToCursor = true
 
-							// 💡 탭 좌우 이동 시 화면 렌더링 캐시 동기화
+							if ev.Key() != tcell.KeyEnd {
+							b.stickToWrapEnd = false
+						}
+
+
+
+						
 
 							// 💡 탭 좌우 이동 시 화면 렌더링 캐시 동기화
 						if isAlt && ev.Rune() == ',' { editor.activeBuffer = (editor.activeBuffer - 1 + len(editor.buffers)) % len(editor.buffers); editor.needsFullRefresh = true; needsLayout = true; continue }
@@ -2963,13 +3100,17 @@ if isAlt && ev.Rune() == '.' { editor.activeBuffer = (editor.activeBuffer + 1) %
 									} else {
 										currentVIdx := b.getVCursorIdx(editor.cfg); currentVL := b.getVisualLine(currentVIdx, editor.cfg); b.cursor.C = currentVL.startCX
 									}
-								case tcell.KeyEnd:
+							case tcell.KeyEnd:
 									if isCtrl {
 										lastLineIdx := len(b.lines) - 1
 										if lastLineIdx < 0 { lastLineIdx = 0 }
 										b.cursor = Loc{lastLineIdx, len(b.lines[lastLineIdx])}
+										b.stickToWrapEnd = true // 파일 끝에서도 안전하게 켜둠
 									} else {
-										currentVIdx := b.getVCursorIdx(editor.cfg); currentVL := b.getVisualLine(currentVIdx, editor.cfg); b.cursor.C = currentVL.endCX
+										currentVIdx := b.getVCursorIdx(editor.cfg)
+										currentVL := b.getVisualLine(currentVIdx, editor.cfg)
+										b.cursor.C = currentVL.endCX
+										b.stickToWrapEnd = true // 💡 명시적으로 현재 시각적 줄의 끝에 머무름!
 									}
 								case tcell.KeyEnter:
 									b.BeginTransaction(); b.DeleteSelection()
