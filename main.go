@@ -2767,9 +2767,9 @@ if isAlt && ev.Rune() == '.' { editor.activeBuffer = (editor.activeBuffer + 1) %
 										} else if editor.activeBuffer > target { editor.activeBuffer-- }
 										editor.needsFullRefresh = true; needsLayout = true // ✅ 수정됨
 									} else if editor.promptType == "reset_config" {
-										defaultCfg := DefaultConfig(); data, _ := json.MarshalIndent(defaultCfg, "", "    "); _ = ioutil.WriteFile(getConfigPath(), data, 0644); editor.cfg = defaultCfg
-											for _, buf := range editor.buffers { if buf.isConfig { buf.isModified = false; buf.reloadFromDisk() } }
-											editor.needsFullRefresh = true; needsLayout = true // ✅ 수정됨
+    defaultCfg := DefaultConfig(); data, _ := json.MarshalIndent(defaultCfg, "", "    "); _ = ioutil.WriteFile(getConfigPath(), data, 0644); editor.cfg = defaultCfg
+        for _, buf := range editor.buffers { if buf.isConfig { buf.isModified = false; buf.savedContent = ""; buf.reloadFromDisk() } }
+        editor.needsFullRefresh = true; needsLayout = true // ✅ 수정됨
 									} else if editor.promptType == "reopen" { editor.getActive().reopenWithEncoding(editor.targetEncoding); editor.needsFullRefresh = true; needsLayout = true // ✅ 수정됨
 									} else if editor.promptType == "close_config" {
 										target := editor.targetCloseBuffer; bufToClose := editor.buffers[target]; if bufToClose.filePath != "" { editor.fileWatcher.Remove(bufToClose.filePath) }
