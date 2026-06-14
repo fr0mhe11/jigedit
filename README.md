@@ -80,3 +80,9 @@ sudo pacman -Rns zenity xclip
 sudo dnf remove zenity xclip
 sudo dnf autoremove
 ```
+
+## TODO
+
+- [ ] syntex highlighting
+- [ ] multi cursor feature
+
