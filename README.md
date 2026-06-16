@@ -82,7 +82,7 @@ sudo dnf autoremove
 ```
 
 ## TODO
-
+- [ ] extensive encoding support
 - [ ] syntex highlighting
 - [ ] multi cursor feature
 
