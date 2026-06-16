@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
+	
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -32,7 +32,6 @@ import (
 )
 
 // --- [ 1. 설정 및 도구 정의 ] ---
-
 type Config struct {
 	ShowLineNumbers bool   `json:"show_line_numbers"`
 	LineWrapping    bool   `json:"line_wrapping"`
@@ -41,9 +40,8 @@ type Config struct {
 	HighlightLine   bool   `json:"highlight_line"`
 	OverlapSearch   bool   `json:"overlap_search"`
 	AutoIndent      bool   `json:"auto_indent"`
-	LineWrappingCap int    `json:"line_wrapping_cap"`
+	
 }
-
 func DefaultConfig() Config {
 	return Config{
 		ShowLineNumbers: true,
@@ -53,10 +51,9 @@ func DefaultConfig() Config {
 		HighlightLine:   true,
 		OverlapSearch:   false,
 		AutoIndent:      true,
-		LineWrappingCap: 0,
+		
 	}
 }
-
 func getConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -90,7 +87,33 @@ func LoadConfig() Config {
 	return cfg
 }
 
+func (e *Editor) closeBuffer(idx int) {
+	b := e.buffers[idx]
+	if b.filePath != "" { e.fileWatcher.Remove(b.filePath) }
+	if b.syncTimer != nil { b.syncTimer.Stop() } // 💡 타이머 좀비화 방지
 
+	// 💡 슬라이스에서 제거할 때 끝부분의 포인터를 nil로 덮어써서 GC가 메모리를 회수하게 함
+	copy(e.buffers[idx:], e.buffers[idx+1:])
+	e.buffers[len(e.buffers)-1] = nil
+	e.buffers = e.buffers[:len(e.buffers)-1]
+
+
+
+
+	// 💡 탭을 다 닫아서 0개가 되면 에디터를 안전하게 종료합니다 (튕김 방지)
+	if len(e.buffers) == 0 {
+		if globalScreenHandle != nil && *globalScreenHandle != nil {
+			(*globalScreenHandle).Fini()
+		}
+		os.Exit(0)
+	}
+
+	if e.activeBuffer == idx {
+		if e.activeBuffer >= len(e.buffers) { e.activeBuffer = len(e.buffers) - 1 }
+	} else if e.activeBuffer > idx {
+		e.activeBuffer--
+	}
+}
 
 
 func convertLinuxDateToGoLayout(linuxFormat string) string {
@@ -123,7 +146,12 @@ func getTextEncoding(name string) encoding.Encoding {
 // 💡 파일을 처음 열 때 자동 추론하는 함수 (기존 로직 유지)
 // 💡 파일을 처음 열 때 다국어 인코딩을 자동 추론하는 엔진
 func readFileDetectEncoding(path string) (string, string, error) {
-	data, err := ioutil.ReadFile(path)
+	// 💡 특수 파일(소켓, 파이프, 디바이스)을 열어 무한 대기(Hang)에 빠지는 현상 방지
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		return "", "", fmt.Errorf("일반 파일이 아닙니다")
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", "", err
 	}
@@ -200,13 +228,23 @@ func readFileWithEncoding(path string, encName string) (string, error) {
 func saveFileWithEncoding(path string, content string, encName string) error {
 	enc := getTextEncoding(encName)
 	if enc == nil {
-		return ioutil.WriteFile(path, []byte(content), 0644)
+		// 💡 파일 권한 유지, 심볼릭 링크 유지를 위해 원본 방식(In-place Write)으로 원상 복구!
+		return os.WriteFile(path, []byte(content), 0644)
 	}
+
 	var buf bytes.Buffer
 	writer := transform.NewWriter(&buf, enc.NewEncoder())
-	writer.Write([]byte(content))
-	writer.Close()
-	return ioutil.WriteFile(path, buf.Bytes(), 0644)
+	// 인코딩 변환 실패 시 에러를 뱉는 안전장치는 그대로 유지
+	if _, err := writer.Write([]byte(content)); err != nil {
+		writer.Close()
+		return fmt.Errorf("인코딩 변환 오류: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("인코딩 종료 오류: %v", err)
+	}
+	
+	// 💡 원본 방식으로 복구!
+	return os.WriteFile(path, buf.Bytes(), 0644)
 }
 
 
@@ -321,7 +359,7 @@ encodeBtnX1 int
 	// Net Change 감지용
 	savedTotalChars int
 	syncTimer       *time.Timer
-	contentMutex    sync.Mutex
+	
 
 	stickToWrapEnd  bool
 }
@@ -436,12 +474,9 @@ func (e *Editor) listenFileChanges() {
 			case event, ok := <-e.fileWatcher.Events:
 				if !ok { return }
 				if event.Op&fsnotify.Write == fsnotify.Write {
-					for _, buf := range e.buffers {
-						if buf.filePath == event.Name {
-							if globalScreenHandle != nil && *globalScreenHandle != nil {
-								(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt(buf.filePath))
-							}
-						}
+					// 💡 탭 배열(e.buffers)을 여기서 읽지 않고, 메인 스레드로 파일 경로만 안전하게 넘깁니다.
+					if globalScreenHandle != nil && *globalScreenHandle != nil {
+						(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt(event.Name))
 					}
 				}
 			case err, ok := <-e.fileWatcher.Errors:
@@ -603,7 +638,8 @@ func (b *Buffer) setLinesFromText(strData string) {
 
 func (b *Buffer) getContent() string {
 	var sb strings.Builder
-	sb.Grow(b.totalChars + len(b.lines))
+	// 💡 한글(다국어) 저장을 고려해 넉넉하게 메모리 사전 확보
+	sb.Grow((b.totalChars * 3) + len(b.lines))
 	for i, line := range b.lines {
 		sb.WriteString(string(line))
 		if i < len(b.lines)-1 { sb.WriteByte('\n') }
@@ -675,16 +711,11 @@ func (b *Buffer) checkModified() {
 	}
 	
 	// 글자수가 우연히 똑같을 때만 100ms초 뒤에 백그라운드 검사
+// 글자수가 우연히 똑같을 때만 100ms초 뒤에 백그라운드 검사
 	b.syncTimer = time.AfterFunc(100*time.Millisecond, func() {
-		b.contentMutex.Lock()
-		defer b.contentMutex.Unlock()
-		
-		// 💡 무거운 getContent() 대신 메모리 점유율 0%인 극한 비교기 사용
-		if b.isContentEqual() {
-			b.isModified = false
-			if globalScreenHandle != nil && *globalScreenHandle != nil {
-				(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt("refresh_mod_state"))
-			}
+		// 💡 타이머는 메인 이벤트 루프에 "해당 버퍼를 검사하라"는 신호(*Buffer 포인터)만 던집니다. (안전함)
+		if globalScreenHandle != nil && *globalScreenHandle != nil {
+			(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt(b))
 		}
 	})
 }
@@ -909,8 +940,8 @@ func (b *Buffer) EndTransaction() {
 		// 💡 메모리 누수 방지: 단순 슬라이싱은 기존 배열이 메모리에 남게 되므로,
 		// 완전히 새로운 슬라이스로 복사(Copy)하여 가비지 컬렉터(GC)가 예전 메모리를 회수하게 함.
 		if len(b.undoStack) > 1000 {
-			newStack := make([]Transaction, 800)
-			copy(newStack, b.undoStack[201:])
+			newStack := make([]Transaction, 0, 800)
+			newStack = append(newStack, b.undoStack[len(b.undoStack)-800:]...)
 			b.undoStack = newStack
 		}
 		b.checkModified()
@@ -1056,14 +1087,8 @@ func (b *Buffer) isLineUnwrapped(lineIdx int, cfg Config) bool {
 	if lineIdx < 0 || lineIdx >= len(b.lines) {
 		return false
 	}
-	if !cfg.LineWrapping {
-		return true
-	}
-	// 💡 Cap이 0보다 클 때만 제한을 걸고, 0이면 무조건 false(랩핑 유지)를 반환!
-	if cfg.LineWrappingCap > 0 && len(b.lines[lineIdx]) > cfg.LineWrappingCap {
-		return true
-	}
-	return false
+	// 💡 래핑 옵션이 꺼져 있을 때만 true를 반환하는 원래의 완벽한 상태로 복구!
+	return !cfg.LineWrapping
 }
 
 func (b *Buffer) getLineNumWidth(cfg Config) int {
@@ -1085,13 +1110,14 @@ func (b *Buffer) getLineNumWidth(cfg Config) int {
 // 💡 4. 동적 Visual Line (화면 렌더링용 줄바꿈 계산) 캐시 엔진
 // 💡 4. 동적 가상 렌더링 (Dynamic Virtual Windowing) 엔진
 // 💡 4. 부분 계산(Per-Line Cache) 엔진 - 100만 줄도 0.001초 컷
+// 💡 4. 부분 계산(Per-Line Cache) 엔진
 func (b *Buffer) generateVisualLines(maxWidth int, cfg Config) []VisualLine {
 	lineNumWidth := b.getLineNumWidth(cfg)
 	textMaxWidth := maxWidth - lineNumWidth
 	if textMaxWidth <= 0 { textMaxWidth = 1 }
 
-	// 설정이나 너비가 바뀌면 전체 캐시 리셋
-	if b.cachedMaxWidth != maxWidth || b.cachedConfig.LineWrapping != cfg.LineWrapping || b.cachedConfig.TabSize != cfg.TabSize || b.cachedConfig.LineWrappingCap != cfg.LineWrappingCap {
+	// 💡 LineWrappingCap 검사 제거됨
+	if b.cachedMaxWidth != maxWidth || b.cachedConfig.LineWrapping != cfg.LineWrapping || b.cachedConfig.TabSize != cfg.TabSize {
 		for i := range b.vCache { b.vCache[i] = nil }
 		b.cachedMaxWidth = maxWidth
 		b.cachedConfig = cfg
@@ -1099,10 +1125,11 @@ func (b *Buffer) generateVisualLines(maxWidth int, cfg Config) []VisualLine {
 
 	total := 0
 	for i, line := range b.lines {
-	if b.vCache[i] == nil {
+		if b.vCache[i] == nil {
 			var temp []VisualLine
-			// 💡 Cap이 0보다 클 때만 초과 검사를 실행! (0이면 제한 없이 랩핑)
-			if !cfg.LineWrapping || len(line) == 0 || (cfg.LineWrappingCap > 0 && len(line) > cfg.LineWrappingCap) {
+			
+			// 💡 Cap 관련 초과 검사 로직 삭제, 순수하게 랩핑 옵션만 검사!
+			if !cfg.LineWrapping || len(line) == 0 {
 				temp = []VisualLine{{lineIdx: i, isWrapped: false, startCX: 0, endCX: len(line)}}
 			} else {
 				start, currentX := 0, 0
@@ -1122,11 +1149,10 @@ func (b *Buffer) generateVisualLines(maxWidth int, cfg Config) []VisualLine {
 		total += len(b.vCache[i])
 	}
 
-	// 💡 미리 크기를 할당하여 메모리 복사 속도 극대화
 	vLines := make([]VisualLine, 0, total)
 	for i, c := range b.vCache {
 		for j := range c {
-			c[j].lineIdx = i // 인덱스 밀림 완벽 보정
+			c[j].lineIdx = i 
 			vLines = append(vLines, c[j])
 		}
 	}
@@ -1228,10 +1254,9 @@ func (b *Buffer) scrollToCursorH(textMaxWidth int, cfg Config) {
 
 	startVisX := cursorVisX
 	endVisX := cursorVisX + charWidth
-
-	// 💡 [핵심 버그 수정] 강제 0 스냅(옵션 C) 폐기 및 물리 법칙 보정!
-	// 랩핑된 줄(짧은 줄)은 구조상 텍스트가 화면 우측(textMaxWidth)을 물리적으로 뚫고 나갈 수 없습니다.
-	// 벽에 딱 맞닿았을 때 커서 두께(charWidth) 때문에 가로 스크롤이 1칸씩 밀리며 덜컹거리는 버그를 원천 차단합니다.
+// 💡 [핵심 버그 수정] 강제 0 스냅(옵션 C) 폐기 및 물리 법칙 보정!
+	// 랩핑된 줄은 구조상 텍스트가 화면 우측(textMaxWidth)을 물리적으로 뚫고 나갈 수 없습니다.
+	// 벽에 딱 맞닿았을 때 커서 두께(charWidth) 때문에 가로 스크롤이 1칸씩 밀리며 덜컹거리는 버그를 진짜로 원천 차단합니다.
 	if !b.isLineUnwrapped(vl.lineIdx, cfg) {
 		if endVisX > textMaxWidth {
 			endVisX = textMaxWidth
@@ -1294,14 +1319,9 @@ func (b *Buffer) screenToMemoryPosV(vLines []VisualLine, mx, my, tabHeight int, 
 
 
 func sprintfRight(num, width int) string {
-	res := ""
-	n := num
-	for n > 0 { res = string(rune('0'+(n%10))) + res; n /= 10 }
-	if num == 0 { res = "0" }
-	for len(res) < width { res = " " + res }
-	return res
+	// 💡 문자열 반복 연산을 없애고 표준 라이브러리를 통해 즉시 공간 정렬
+	return fmt.Sprintf("%*d", width, num)
 }
-
 // 💡 추가됨: 파일명이 겹치면 부모 폴더까지 보여주는 스마트 타이틀 함수
 func (e *Editor) getTabTitle(bufIdx int) string {
 	b := e.buffers[bufIdx]
@@ -1335,23 +1355,35 @@ func (e *Editor) draw(s tcell.Screen, vLines []VisualLine) {
 	if h <= 0 || w <= 0 { return }
 
 	b := e.getActive()
-	if e.activeBuffer != e.prevActiveBuf || b.vOffsetIdx != e.prevVOffset || b.hOffset != e.prevHOffset ||
+if e.activeBuffer != e.prevActiveBuf || b.vOffsetIdx != e.prevVOffset || b.hOffset != e.prevHOffset ||
 		e.paletteActive != e.prevPalette || e.ctxMenuActive != e.prevCtxMenu || e.encodeMenuActive != e.prevEncode ||
 		e.promptMode != e.prevPrompt || b.searchMode != e.prevSearch || b.gotoMode != e.prevGoto || b.isReplace != e.prevReplace || len(b.lines) != e.prevLinesLen {
 			e.needsFullRefresh = true
 		}
 
-if e.needsFullRefresh || w != e.prevW || h != e.prevH {
-			s.Clear()
-			e.screenCache = make([][]cellState, h)
-			e.nextCache = make([][]cellState, h) // 💡 렌더링 버퍼 영구 할당
-			for y := 0; y < h; y++ {
-				e.screenCache[y] = make([]cellState, w)
-				e.nextCache[y] = make([]cellState, w) // 💡 타입 수정됨
-				for x := 0; x < w; x++ { e.screenCache[y][x] = cellState{mainc: ' ', style: tcell.StyleDefault} }
-			}
-			e.prevW = w; e.prevH = h; e.needsFullRefresh = false
+	if w != e.prevW || h != e.prevH {
+		e.screenCache = make([][]cellState, h)
+		e.nextCache = make([][]cellState, h) 
+		for y := 0; y < h; y++ {
+			e.screenCache[y] = make([]cellState, w)
+			e.nextCache[y] = make([]cellState, w)
+			for x := 0; x < w; x++ { e.screenCache[y][x] = cellState{mainc: ' ', style: tcell.StyleDefault} }
 		}
+		e.prevW = w; e.prevH = h
+		e.needsFullRefresh = true
+	}
+
+	// 💡 버벅임 없이 화면 전체 잔상을 완벽하게 밀어버리는 최적화 로직
+	if e.needsFullRefresh {
+		s.Clear()
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				// 화면 캐시를 강제로 비워 모든 칸이 무조건 새로 그려지도록 유도
+				e.screenCache[y][x] = cellState{mainc: 0}
+			}
+		}
+		e.needsFullRefresh = false
+	}
 
 		// 💡 매 프레임마다 배열을 버리지 않고 기존 배열 내용을 초기화하여 재사용 (Zero Allocation)
 		for y := 0; y < h; y++ {
@@ -1905,6 +1937,8 @@ func (e *Editor) saveActiveFile(s tcell.Screen) {
 
 	b.savedContent = content
 	b.markSaved()
+	
+	
 
 	if b.isConfig {
 		var newCfg Config
@@ -1912,20 +1946,23 @@ func (e *Editor) saveActiveFile(s tcell.Screen) {
 	}
 }
 
+
 func (e *Editor) saveAsFile(s tcell.Screen) {
 	b := e.getActive()
 	s.Suspend()
 	filePath, err := zenity.SelectFileSave(zenity.Title("다른 이름으로 저장"), zenity.ConfirmOverwrite())
 	s.Resume()
 
-	// 💡 FIX: GUI 창이 닫힌 직후 터미널 화면 강제 전체 리프레시!
 	s.Sync()
 	e.needsFullRefresh = true
 
 	if err != nil || filePath == "" { return }
+	
+	// 💡 이전 파일 경로를 백업해둡니다
+	oldPath := b.filePath
 	b.filePath = filePath
 
-content := b.getContent()
+	content := b.getContent()
 	err = saveFileWithEncoding(b.filePath, content, b.encoding)
 	if err != nil {
 		e.promptMode = true
@@ -1936,7 +1973,11 @@ content := b.getContent()
 
 	b.savedContent = content
 	b.markSaved()
-	// 💡 새 경로를 파일 감지기에 등록
+	
+	// 💡 이름이 바뀌었다면 이전 파일의 감시를 해제하고 새 파일을 감시
+	if oldPath != "" && oldPath != filePath {
+		e.fileWatcher.Remove(oldPath)
+	}
 	e.fileWatcher.Add(filePath)
 
 	if b.isConfig {
@@ -1944,6 +1985,7 @@ content := b.getContent()
 		if err := json.Unmarshal([]byte(content), &newCfg); err == nil { e.cfg = newCfg }
 	}
 }
+
 
 func (e *Editor) toggleConfigBuffer() {
 	for i, buf := range e.buffers {
@@ -1955,8 +1997,7 @@ func (e *Editor) toggleConfigBuffer() {
 				e.targetCloseBuffer = i
 				return
 			}
-			if buf.filePath != "" { e.fileWatcher.Remove(buf.filePath) }
-			e.buffers = append(e.buffers[:i], e.buffers[i+1:]...)
+		e.closeBuffer(i)
 			e.activeBuffer = 0
 			return
 		}
@@ -1973,7 +2014,7 @@ func (e *Editor) toggleConfigBuffer() {
 	// 💡 config.json 파일도 감지기에 등록
 	e.fileWatcher.Add(path)
 
-	configBuf.setLinesFromText(strData)
+	
 	configBuf.setLinesFromText(strData)
 	configBuf.savedContent = configBuf.getContent()
 	configBuf.savedTotalChars = configBuf.totalChars // 💡 추가됨
@@ -2214,9 +2255,7 @@ func (e *Editor) toggleConfigBuffer() {
 					 b := e.getActive()
 					 if b.isModified { e.promptMode = true; e.promptType = "close"; e.targetCloseBuffer = e.activeBuffer; return }
 					 if len(e.buffers) <= 1 { s.Fini(); os.Exit(0) }
-					 if b.filePath != "" { e.fileWatcher.Remove(b.filePath) }
-					 e.buffers = append(e.buffers[:e.activeBuffer], e.buffers[e.activeBuffer+1:]...)
-					 if e.activeBuffer >= len(e.buffers) { e.activeBuffer = len(e.buffers) - 1 }
+				 e.closeBuffer(e.activeBuffer)
 					 e.needsFullRefresh = true
 				 },
 				 tcell.KeyCtrlBackslash: func(e *Editor, s tcell.Screen) { e.activeBuffer = (e.activeBuffer + 1) % len(e.buffers) },
@@ -2341,7 +2380,7 @@ func main() {
 		case "-o", "--open":     actions = append(actions, StartupAction{Type: "picker", ReadOnly: currentRO})
 		case "-n", "--new":      actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.0 - The Terminal Editor")
+			fmt.Println("jigedit v1.0.3 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -2451,14 +2490,18 @@ func main() {
 				switch ev := ev.(type) {
 					case *tcell.EventResize: currentScreen.Sync(); needsLayout = true; snapToCursor = true
 					case *tcell.EventInterrupt:
-						filePath, ok := ev.Data().(string)
-						if ok {
-							// 💡 백그라운드 고루틴이 탭 상태 변경을 감지했을 때 화면 강제 갱신
-							if filePath == "refresh_mod_state" {
+						// 💡 타이머가 보낸 버퍼 검사 요청을 메인 스레드에서 안전하게 처리
+						if targetBuf, isBuf := ev.Data().(*Buffer); isBuf {
+							if targetBuf.isContentEqual() {
+								targetBuf.isModified = false
 								editor.needsFullRefresh = true
 								needsLayout = true
-								continue
 							}
+							continue
+						}
+
+						filePath, ok := ev.Data().(string)
+						if ok {
 
 							
 							for i, buf := range editor.buffers {
@@ -2757,27 +2800,30 @@ if isAlt && ev.Rune() == '.' { editor.activeBuffer = (editor.activeBuffer + 1) %
 								} else if ev.Rune() == 'y' || ev.Rune() == 'Y' {
 									editor.promptMode = false
 
+									// 💡 타겟 탭이 여전히 유효한지 검사하는 안전장치 추가!
+									target := editor.targetCloseBuffer
+									isValidTarget := target >= 0 && target < len(editor.buffers)
+
 									if editor.promptType == "quit" { currentScreen.Fini(); os.Exit(0)
 									} else if editor.promptType == "close" {
-										target := editor.targetCloseBuffer
+										if !isValidTarget { continue }
 										if len(editor.buffers) <= 1 { currentScreen.Fini(); os.Exit(0) }
-										bufToClose := editor.buffers[target]; if bufToClose.filePath != "" { editor.fileWatcher.Remove(bufToClose.filePath) }
-										editor.buffers = append(editor.buffers[:target], editor.buffers[target+1:]...)
-										if editor.activeBuffer == target { if editor.activeBuffer >= len(editor.buffers) { editor.activeBuffer = len(editor.buffers) - 1 }
-										} else if editor.activeBuffer > target { editor.activeBuffer-- }
-										editor.needsFullRefresh = true; needsLayout = true // ✅ 수정됨
+										editor.closeBuffer(target)
+										editor.needsFullRefresh = true; needsLayout = true
 									} else if editor.promptType == "reset_config" {
     defaultCfg := DefaultConfig(); data, _ := json.MarshalIndent(defaultCfg, "", "    "); _ = ioutil.WriteFile(getConfigPath(), data, 0644); editor.cfg = defaultCfg
         for _, buf := range editor.buffers { if buf.isConfig { buf.isModified = false; buf.savedContent = ""; buf.reloadFromDisk() } }
-        editor.needsFullRefresh = true; needsLayout = true // ✅ 수정됨
-									} else if editor.promptType == "reopen" { editor.getActive().reopenWithEncoding(editor.targetEncoding); editor.needsFullRefresh = true; needsLayout = true // ✅ 수정됨
+        editor.needsFullRefresh = true; needsLayout = true
+									} else if editor.promptType == "reopen" { editor.getActive().reopenWithEncoding(editor.targetEncoding); editor.needsFullRefresh = true; needsLayout = true
 									} else if editor.promptType == "close_config" {
-										target := editor.targetCloseBuffer; bufToClose := editor.buffers[target]; if bufToClose.filePath != "" { editor.fileWatcher.Remove(bufToClose.filePath) }
-										editor.buffers = append(editor.buffers[:target], editor.buffers[target+1:]...); editor.activeBuffer = 0; editor.needsFullRefresh = true; needsLayout = true // ✅ 수정됨
+										if !isValidTarget { continue }
+										editor.closeBuffer(target)
+										editor.activeBuffer = 0; editor.needsFullRefresh = true; needsLayout = true
 									} else if editor.promptType == "external_change" {
-										target := editor.targetCloseBuffer; bufToReload := editor.buffers[target]; bufToReload.isModified = false
+										if !isValidTarget { continue }
+										bufToReload := editor.buffers[target]; bufToReload.isModified = false
 										if bufToReload.reloadFromDisk() { if bufToReload.isConfig { var newCfg Config; if err := json.Unmarshal([]byte(bufToReload.savedContent), &newCfg); err == nil { editor.cfg = newCfg } } }
-										editor.needsFullRefresh = true; needsLayout = true; snapToCursor = true // ✅ 수정됨
+										editor.needsFullRefresh = true; needsLayout = true; snapToCursor = true
 									}
 								}
 								continue
