@@ -25,10 +25,13 @@ import (
 
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
-	"golang.org/x/text/encoding/japanese"
+		"golang.org/x/text/encoding/japanese"
 	"golang.org/x/text/encoding/korean"
 	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/traditionalchinese"
+	xunicode "golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
+	"github.com/saintfish/chardet"
 )
 
 // --- [ 1. 설정 및 도구 정의 ] ---
@@ -126,85 +129,90 @@ func convertLinuxDateToGoLayout(linuxFormat string) string {
 }
 
 // 💡 이름으로 인코딩 객체를 매핑해주는 범용 엔진
+type EncodingGroup struct {
+	Region    string
+	Encodings []string
+}
+
+var encodingGroups = []EncodingGroup{
+	{Region: "Unicode", Encodings: []string{"UTF-8", "UTF-16 LE", "UTF-16 BE"}},
+	{Region: "Korean", Encodings: []string{"UTF-8", "CP949 (EUC-KR)"}},
+	{Region: "Japanese", Encodings: []string{"Shift-JIS", "EUC-JP", "ISO-2022-JP"}},
+	{Region: "Chinese Simplified", Encodings: []string{"GBK", "GB18030", "HZ-GB2312"}},
+	{Region: "Chinese Traditional", Encodings: []string{"Big5"}},
+	{Region: "Western European", Encodings: []string{"ISO-8859-1", "ISO-8859-15", "CP1252"}},
+	{Region: "Central European", Encodings: []string{"ISO-8859-2", "CP1250"}},
+	{Region: "Cyrillic", Encodings: []string{"KOI8-R", "KOI8-U", "CP1251", "ISO-8859-5"}},
+	{Region: "Greek", Encodings: []string{"ISO-8859-7", "CP1253"}},
+	{Region: "Turkish", Encodings: []string{"ISO-8859-9", "CP1254"}},
+	{Region: "Hebrew", Encodings: []string{"ISO-8859-8", "CP1255"}},
+	{Region: "Arabic", Encodings: []string{"ISO-8859-6", "CP1256"}},
+	{Region: "Thai", Encodings: []string{"CP874", "CP1258"}},
+	{Region: "Baltic", Encodings: []string{"ISO-8859-4", "ISO-8859-13", "CP1257"}},
+	{Region: "Nordic", Encodings: []string{"ISO-8859-10"}},
+}
+
+// 💡 이름으로 인코딩 객체를 매핑해주는 범용 엔진
 func getTextEncoding(name string) encoding.Encoding {
 	switch name {
-		case "EUC-KR":
-			return korean.EUCKR
-		case "Shift-JIS":
-			return japanese.ShiftJIS
-		case "EUC-JP":
-			return japanese.EUCJP
-		case "GBK":
-			return simplifiedchinese.GBK
-		case "CP1252":
-			return charmap.Windows1252
-		default:
-			return nil // UTF-8 또는 지원하지 않는 경우
+	// Korean
+	case "CP949 (EUC-KR)", "CP949", "EUC-KR": return korean.EUCKR
+	
+	// Unicode
+	case "UTF-16 LE": return xunicode.UTF16(xunicode.LittleEndian, xunicode.UseBOM)
+	case "UTF-16 BE": return xunicode.UTF16(xunicode.BigEndian, xunicode.UseBOM)
+	
+	// Japanese
+	case "Shift-JIS":   return japanese.ShiftJIS
+	case "EUC-JP":      return japanese.EUCJP
+	case "ISO-2022-JP": return japanese.ISO2022JP
+	
+	// Chinese
+	case "GBK":         return simplifiedchinese.GBK
+	case "GB18030":     return simplifiedchinese.GB18030
+	case "HZ-GB2312":   return simplifiedchinese.HZGB2312
+	case "Big5":        return traditionalchinese.Big5
+	
+	// Western / Central European
+	case "ISO-8859-1":  return charmap.ISO8859_1
+	case "ISO-8859-15": return charmap.ISO8859_15
+	case "CP1252":      return charmap.Windows1252
+	case "ISO-8859-2":  return charmap.ISO8859_2
+	case "CP1250":      return charmap.Windows1250
+	
+	// Cyrillic (Russian)
+	case "KOI8-R":      return charmap.KOI8R
+	case "KOI8-U":      return charmap.KOI8U
+	case "CP1251":      return charmap.Windows1251
+	case "ISO-8859-5":  return charmap.ISO8859_5
+	
+	// Greek & Turkish
+	case "ISO-8859-7":  return charmap.ISO8859_7
+	case "CP1253":      return charmap.Windows1253
+	case "ISO-8859-9":  return charmap.ISO8859_9
+	case "CP1254":      return charmap.Windows1254
+	
+	// Hebrew & Arabic
+	case "ISO-8859-8":  return charmap.ISO8859_8
+	case "CP1255":      return charmap.Windows1255
+	case "ISO-8859-6":  return charmap.ISO8859_6
+	case "CP1256":      return charmap.Windows1256
+	
+	// Thai, Baltic, Nordic
+	case "CP874":       return charmap.Windows874
+	case "CP1258":      return charmap.Windows1258
+	case "ISO-8859-4":  return charmap.ISO8859_4
+	case "ISO-8859-13": return charmap.ISO8859_13
+	case "CP1257":      return charmap.Windows1257
+	case "ISO-8859-10": return charmap.ISO8859_10
+
+	default:
+		return nil // UTF-8
 	}
 }
 
-// 💡 파일을 처음 열 때 자동 추론하는 함수 (기존 로직 유지)
-// 💡 파일을 처음 열 때 다국어 인코딩을 자동 추론하는 엔진
-func readFileDetectEncoding(path string) (string, string, error) {
-	// 💡 특수 파일(소켓, 파이프, 디바이스)을 열어 무한 대기(Hang)에 빠지는 현상 방지
-	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
-		return "", "", fmt.Errorf("일반 파일이 아닙니다")
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", "", err
-	}
-	
-	// 1. 순수 UTF-8 검증 (가장 빠르고 확실함)
-	if utf8.Valid(data) {
-		return string(data), "UTF-8", nil
-	}
-
-	// 2. 다른 인코딩 후보들 테스트 (우선순위: 한국어 -> 일본어 -> 중국어 -> 서유럽)
-	candidates := []string{"EUC-KR", "Shift-JIS", "EUC-JP", "GBK", "CP1252"}
-	
-	var bestDecoded []byte
-	bestEnc := "UTF-8"
-	lowestErrors := len(data) + 1 // 최소 에러 개수 갱신용 (초기값은 무한대 대용)
-
-	for _, encName := range candidates {
-		enc := getTextEncoding(encName)
-		if enc == nil {
-			continue
-		}
-
-		// 해당 인코딩으로 변환 시도
-		reader := transform.NewReader(bytes.NewReader(data), enc.NewDecoder())
-		decoded, err := ioutil.ReadAll(reader)
-		if err != nil {
-			continue
-		}
-
-		// 변환된 결과물에 디코딩 실패/깨진 글자(Replacement Character, \uFFFD)가 몇 개인지 카운트
-		errorCount := bytes.Count(decoded, []byte("\uFFFD"))
-		
-		// 깨진 글자가 단 하나도 없다면, 이 인코딩이 거의 100% 확실하므로 즉시 반환
-		if errorCount == 0 {
-			return string(decoded), encName, nil
-		}
-
-		// 만약 완벽한 인코딩이 없다면, 가장 깨진 글자가 적은(오류가 적은) 인코딩을 기억해둠
-		if errorCount < lowestErrors {
-			lowestErrors = errorCount
-			bestDecoded = decoded
-			bestEnc = encName
-		}
-	}
-
-	// 3. 후보를 다 돌았는데도 완벽한 걸 못 찾았으면 차선책 반환
-	if bestDecoded != nil {
-		return string(bestDecoded), bestEnc, nil
-	}
-
-	// 최악의 경우 원본 반환
-	return string(data), "UTF-8", nil
-}
+// 💡 KWrite(Uchardet) 수준의 통계학 기반 언어 감지 엔진
+// 💡 KWrite(Uchardet) 수준의 통계학 기반 언어 감지 엔진 (모든 인코딩 완벽 매핑)
 
 // 💡 사용자가 강제로 인코딩을 지정해서 다시 읽어오는 함수 (Reopen)
 func readFileWithEncoding(path string, encName string) (string, error) {
@@ -212,6 +220,14 @@ func readFileWithEncoding(path string, encName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// 💡 [숨은 버그 완벽 수정] 사용자가 수동으로 UTF-8을 고르거나 파일 감지기가 리로드할 때,
+	// UTF-8 BOM이 존재한다면 유령 글자가 생기지 않도록 확실히 잘라냅니다!
+	if (encName == "UTF-8" || encName == "") && bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) {
+		data = data[3:]
+	}
+
+
 	enc := getTextEncoding(encName)
 	if enc == nil {
 		return string(data), nil // UTF-8로 폴백
@@ -411,6 +427,10 @@ type Editor struct {
 
 	// 💡 추가됨: 인코딩 선택 메뉴 상태
 	encodeMenuActive bool
+	encodeMenuState  int    // 0:닫힘, 1:액션, 2:지역, 3:인코딩
+	encodeMenuAction string // "save" or "reopen"
+	encodeRegionIdx  int
+	encodeMenuTitle  string
 	encodeMenuItems  []PaletteItem
 	encodeMenuCursor int
 	encodeMenuX      int
@@ -503,51 +523,63 @@ func (e *Editor) initContextMenu() {
 // 💡 재사용과 경고창 연계를 위해 다시 열기 로직을 분리한 헬퍼 함수
 
 
-func (e *Editor) initEncodingMenu() {
-	encodings := []string{"UTF-8", "EUC-KR", "Shift-JIS", "EUC-JP", "GBK", "CP1252"}
-	e.encodeMenuItems = []PaletteItem{}
+func (e *Editor) initEncodingMenu() {} // 에러 방지용 빈 함수
 
-	for _, enc := range encodings {
-		encName := enc
-		e.encodeMenuItems = append(e.encodeMenuItems, PaletteItem{
-			Name:     fmt.Sprintf("저장 인코딩 변경 (Save As): %s", encName),
-					   Shortcut: "",
-					   Action: func(e *Editor, s tcell.Screen) {
-						   b := e.getActive()
-						   if b.encoding != encName {
-							   b.encoding = encName
-							   b.isModified = true
-						   }
-					   },
-		})
+func (e *Editor) showEncodeActionMenu(x, y int) {
+	e.encodeMenuActive = true; e.encodeMenuState = 1; e.encodeMenuTitle = " Select Action "
+	e.encodeMenuX, e.encodeMenuY = x, y
+	e.encodeMenuCursor = 0
+	e.encodeMenuItems = []PaletteItem{
+		{"저장될 인코딩 변경 (Set Save Encoding)...", "", func(e *Editor, s tcell.Screen) {
+			e.encodeMenuAction = "save"; e.showEncodeRegionMenu()
+		}},
+		{"다시 열기 (Reopen With...)", "", func(e *Editor, s tcell.Screen) {
+			e.encodeMenuAction = "reopen"; e.showEncodeRegionMenu()
+		}},
 	}
+}
 
-	e.encodeMenuItems = append(e.encodeMenuItems, PaletteItem{Name: "------------------------------------", Shortcut: "", Action: nil})
-
-	for _, enc := range encodings {
-		encName := enc
+func (e *Editor) showEncodeRegionMenu() {
+	e.encodeMenuActive = true; e.encodeMenuState = 2; e.encodeMenuTitle = " Select Region "
+	e.encodeMenuCursor = 0
+	e.encodeMenuItems = []PaletteItem{
+		{"< 뒤로 가기 (Back)", "", func(e *Editor, s tcell.Screen) { e.showEncodeActionMenu(e.encodeMenuX, e.encodeMenuY) }},
+	}
+	for i, group := range encodingGroups {
+		idx := i
 		e.encodeMenuItems = append(e.encodeMenuItems, PaletteItem{
-			Name:     fmt.Sprintf("다시 열기 (Reopen with): %s", encName),
-					   Shortcut: "",
-					   Action: func(e *Editor, s tcell.Screen) {
-						   b := e.getActive()
-						   if b.filePath == "" { return }
-
-						   // 💡 사용자가 텍스트를 수정 중이라면 경고창(Prompt) 띄우기!
-						   if b.isModified {
-							   e.promptMode = true
-							   e.promptType = "reopen"
-							   e.targetEncoding = encName
-							   return
-						   }
-
-						   // 수정한 게 없으면 바로 다시 열기 실행
-						   b.reopenWithEncoding(encName)
-					   },
+			Name: group.Region + " >",
+			Action: func(e *Editor, s tcell.Screen) { e.encodeRegionIdx = idx; e.showEncodeEncodingMenu() },
 		})
 	}
 }
 
+func (e *Editor) showEncodeEncodingMenu() {
+	e.encodeMenuActive = true; e.encodeMenuState = 3
+	group := encodingGroups[e.encodeRegionIdx]
+	e.encodeMenuTitle = " " + group.Region + " "
+	e.encodeMenuCursor = 0
+	e.encodeMenuItems = []PaletteItem{
+		{"< 뒤로 가기 (Back)", "", func(e *Editor, s tcell.Screen) { e.showEncodeRegionMenu() }},
+		
+	}
+	for _, enc := range group.Encodings {
+		encName := enc
+		e.encodeMenuItems = append(e.encodeMenuItems, PaletteItem{
+			Name: encName,
+			Action: func(e *Editor, s tcell.Screen) {
+				b := e.getActive()
+				if e.encodeMenuAction == "save" {
+					if b.encoding != encName { b.encoding = encName; b.isModified = true }
+				} else if e.encodeMenuAction == "reopen" {
+					if b.filePath == "" { return }
+					if b.isModified { e.promptMode = true; e.promptType = "reopen"; e.targetEncoding = encName; return }
+					b.reopenWithEncoding(encName)
+				}
+			},
+		})
+	}
+}
 
 func (e *Editor) initPalette() {
 	e.paletteItems = []PaletteItem{
@@ -731,14 +763,161 @@ func (b *Buffer) markSaved() {
 }
 
 
+// 💡 chardet 결과를 우리 에디터 이름으로 변환해주는 헬퍼 함수
+func mapChardetToOurs(charset string) string {
+	charset = strings.ToUpper(charset)
+	switch charset {
+	case "EUC-KR", "UHC", "CP949", "ISO-2022-KR": return "CP949 (EUC-KR)"
+	case "SHIFT_JIS", "SHIFT-JIS":                return "Shift-JIS"
+	case "GB-18030", "GB2312", "GBK":             return "GBK"
+	case "BIG5":                                  return "Big5"
+	case "EUC-JP":                                return "EUC-JP"
+	case "ISO-2022-JP":                           return "ISO-2022-JP"
+	case "WINDOWS-1252", "CP1252":                return "CP1252"
+	case "WINDOWS-1250", "CP1250":                return "CP1250"
+	case "WINDOWS-1251", "CP1251":                return "CP1251"
+	case "WINDOWS-1253", "CP1253":                return "CP1253"
+	case "WINDOWS-1254", "CP1254":                return "CP1254"
+	case "WINDOWS-1255", "CP1255":                return "CP1255"
+	case "WINDOWS-1256", "CP1256":                return "CP1256"
+	case "WINDOWS-1257", "CP1257":                return "CP1257"
+	case "WINDOWS-1258", "CP1258":                return "CP1258"
+	case "WINDOWS-874", "CP874", "TIS-620":       return "CP874"
+	case "UTF-16LE":                              return "UTF-16 LE"
+	case "UTF-16BE":                              return "UTF-16 BE"
+	}
+	if getTextEncoding(charset) != nil { return charset }
+	return ""
+}
+
+// 💡 KWrite(Uchardet) + 아시아 언어 엄격 교차 검증 하이브리드 엔진
+// 💡 통계(chardet) + 실전 디코딩 검증(Validation) 하이브리드 엔진
+// 💡 상용 에디터급 종결 엔진: 8KB 샘플링 최적화 + 디코딩 실증 검증
+func readFileDetectEncoding(path string) (string, string, error) {
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		return "", "", fmt.Errorf("일반 파일이 아닙니다")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", err
+	}
+
+	if len(data) == 0 {
+		return "", "UTF-8", nil
+	}
+
+	// 1. BOM (Byte Order Mark) 검사
+	if bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) { return string(data[3:]), "UTF-8", nil }
+	if bytes.HasPrefix(data, []byte{0xFF, 0xFE}) {
+		decoded, _ := ioutil.ReadAll(transform.NewReader(bytes.NewReader(data), getTextEncoding("UTF-16 LE").NewDecoder()))
+		return string(decoded), "UTF-16 LE", nil
+	}
+	if bytes.HasPrefix(data, []byte{0xFE, 0xFF}) {
+		decoded, _ := ioutil.ReadAll(transform.NewReader(bytes.NewReader(data), getTextEncoding("UTF-16 BE").NewDecoder()))
+		return string(decoded), "UTF-16 BE", nil
+	}
+
+	// 2. 순수 UTF-8 검증 (전체 파일 대상)
+	if utf8.Valid(data) { return string(data), "UTF-8", nil }
+
+	// =================================================================
+	// 🚀 최적화 핵심: 파일 전체가 아닌 최대 8KB만 잘라서 샘플(Sample)로 사용!
+	// =================================================================
+	sampleSize := 8192
+	var sample []byte
+	if len(data) > sampleSize {
+		sample = data[:sampleSize]
+	} else {
+		sample = data
+	}
+
+	hasHighBit := false
+	for _, b := range sample {
+		if b > 127 { hasHighBit = true; break }
+	}
+
+	// 3. 샘플 데이터로 통계학 엔진 가동 (0.001초 컷)
+	detector := chardet.NewTextDetector()
+	results, err := detector.DetectAll(sample)
+	
+	bestEncName := "UTF-8"
+	var minErrorCount = -1
+	var fallbackEncName string
+
+	if err == nil && len(results) > 0 {
+		for _, res := range results {
+			mapped := mapChardetToOurs(res.Charset)
+			if mapped == "" { continue }
+
+			// 서유럽어 오탐지 무시
+			isWestern := strings.HasPrefix(mapped, "ISO-8859") || strings.HasPrefix(mapped, "CP125")
+			if hasHighBit && isWestern { continue }
+
+			enc := getTextEncoding(mapped)
+			if enc == nil { continue }
+
+			// 💡 샘플 데이터(8KB)만 변환해서 깨진 글자 검사! (메모리 낭비 X)
+			sampleDecoded, decErr := ioutil.ReadAll(transform.NewReader(bytes.NewReader(sample), enc.NewDecoder()))
+			if decErr != nil { continue }
+
+			errorCount := bytes.Count(sampleDecoded, []byte("\uFFFD"))
+			
+			// 에러가 0개면 완벽한 정답!
+			if errorCount == 0 {
+				bestEncName = mapped
+				goto DECODE_FULL_FILE // 정답을 찾았으니 즉시 파일 전체 변환으로 직행
+			}
+
+			if minErrorCount == -1 || errorCount < minErrorCount {
+				minErrorCount = errorCount
+				fallbackEncName = mapped
+			}
+		}
+	}
+
+	// 4. 완벽한 후보가 없다면, 에러가 제일 적었던 언어 채택
+	if fallbackEncName != "" && minErrorCount < len(sample)/10 {
+		bestEncName = fallbackEncName
+	} else if hasHighBit {
+		// 최후의 보루: 다 실패하면 한국어로 강제
+		bestEncName = "CP949 (EUC-KR)" 
+	}
+
+DECODE_FULL_FILE:
+	// =================================================================
+	// 5. 확정된 인코딩으로 "원본 전체(data)"를 딱 한 번만 디코딩합니다.
+	// =================================================================
+	if bestEncName != "UTF-8" {
+		enc := getTextEncoding(bestEncName)
+		if enc != nil {
+			decodedBytes, err := ioutil.ReadAll(transform.NewReader(bytes.NewReader(data), enc.NewDecoder()))
+			if err == nil {
+				return string(decodedBytes), bestEncName, nil
+			}
+		}
+	}
+
+	// 최후의 최후 폴백
+	return string(data), "UTF-8", nil
+}
+
 func (b *Buffer) reloadFromDisk() bool {
 	if b.filePath == "" || b.isModified { return false }
-	strData, _, err := readFileDetectEncoding(b.filePath)
+
+	var strData string
+	var err error
+	if b.encoding != "" && b.encoding != "UTF-8" {
+		strData, err = readFileWithEncoding(b.filePath, b.encoding)
+	} else {
+		strData, _, err = readFileDetectEncoding(b.filePath)
+	}
+
 	if err != nil || strData == b.savedContent { return false }
 
 	b.setLinesFromText(strData)
 	b.savedContent = b.getContent()
-	b.savedTotalChars = b.totalChars // 💡 글자 수 완벽 동기화 (누락 방지)
+	b.savedTotalChars = b.totalChars // 글자 수 완벽 동기화
 	b.lastExternalSync = time.Now()
 	b.cursor = b.clampLoc(b.cursor)
 	b.undoStack = nil; b.redoStack = nil; b.isSelecting = false
@@ -1767,6 +1946,10 @@ if e.activeBuffer != e.prevActiveBuf || b.vOffsetIdx != e.prevVOffset || b.hOffs
 				if !isActive { return }
 				pWidth := 40
 				if title == " Command Palette " { pWidth = 60 }
+				for _, item := range items {
+					w := runewidth.StringWidth(item.Name) + 10
+					if w > pWidth { pWidth = w }
+				}
 				pHeight := len(items) + 2
 				if pHeight > h-4 { pHeight = h - 4 }
 
@@ -1839,7 +2022,7 @@ if e.activeBuffer != e.prevActiveBuf || b.vOffsetIdx != e.prevVOffset || b.hOffs
 			drawMenu(e.paletteActive, " Command Palette ", e.paletteItems, e.paletteCursor, 0, 0, &e.paletteX, &e.paletteY, &e.paletteW, &e.paletteH)
 
 			drawMenu(e.ctxMenuActive, "", e.ctxMenuItems, e.ctxMenuCursor, e.ctxMenuX, e.ctxMenuY, &e.ctxMenuX, &e.ctxMenuY, &e.ctxMenuW, &e.ctxMenuH)
-			drawMenu(e.encodeMenuActive, " Select Encoding ", e.encodeMenuItems, e.encodeMenuCursor, e.encodeMenuX, e.encodeMenuY, &e.encodeMenuX, &e.encodeMenuY, &e.encodeMenuW, &e.encodeMenuH)
+			drawMenu(e.encodeMenuActive, e.encodeMenuTitle, e.encodeMenuItems, e.encodeMenuCursor, e.encodeMenuX, e.encodeMenuY, &e.encodeMenuX, &e.encodeMenuY, &e.encodeMenuW, &e.encodeMenuH)
 
 			for y := 0; y < h; y++ {
 				for x := 0; x < w; x++ {
@@ -2380,7 +2563,7 @@ func main() {
 		case "-o", "--open":     actions = append(actions, StartupAction{Type: "picker", ReadOnly: currentRO})
 		case "-n", "--new":      actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.0.3 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.0.4 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -2502,11 +2685,17 @@ func main() {
 
 						filePath, ok := ev.Data().(string)
 						if ok {
-
-							
 							for i, buf := range editor.buffers {
 								if buf.filePath == filePath {
-									strData, _, err := readFileDetectEncoding(filePath)
+									// 💡 수정된 부분: 파일 감지기도 현재 탭의 인코딩을 존중합니다.
+									var strData string
+									var err error
+									if buf.encoding != "" && buf.encoding != "UTF-8" {
+										strData, err = readFileWithEncoding(filePath, buf.encoding)
+									} else {
+										strData, _, err = readFileDetectEncoding(filePath)
+									}
+
 									if err == nil && strData != buf.savedContent {
 										if buf.isModified {
 											editor.promptMode = true; editor.promptType = "external_change"; editor.targetCloseBuffer = i; needsLayout = true
@@ -2554,23 +2743,26 @@ func main() {
 							continue
 						}
 
-						if editor.encodeMenuActive {
+							if editor.encodeMenuActive {
 							if mx >= editor.encodeMenuX && mx < editor.encodeMenuX+editor.encodeMenuW && my >= editor.encodeMenuY && my < editor.encodeMenuY+editor.encodeMenuH {
 								clickIdx := my - editor.encodeMenuY - 1
 								if clickIdx >= 0 && clickIdx < len(editor.encodeMenuItems) {
 									if editor.encodeMenuCursor != clickIdx { editor.encodeMenuCursor = clickIdx; needsLayout = true }
 									if isNewPress {
-										action := editor.encodeMenuItems[editor.encodeMenuCursor].Action; editor.encodeMenuActive = false
+										action := editor.encodeMenuItems[editor.encodeMenuCursor].Action
+										editor.encodeMenuActive = false
+										editor.encodeMenuState = 0 // 💡 상태 초기화 필수!
 										if action != nil { action(editor, currentScreen) }; needsLayout = true
 									}
 								}
-							} else if isNewPress { editor.encodeMenuActive = false; needsLayout = true }
+							} else if isNewPress { editor.encodeMenuActive = false; editor.encodeMenuState = 0; needsLayout = true }
 							continue
 						}
 
 						if !b.searchMode && !b.gotoMode && my == h-1 {
 							if !b.isConfig && mx >= b.encodeBtnX1 && mx <= b.encodeBtnX2 && isNewPress {
-								editor.encodeMenuActive = true; editor.encodeMenuX = mx; editor.encodeMenuY = h - 4; editor.encodeMenuCursor = 0; needsLayout = true; continue
+								editor.showEncodeActionMenu(mx, h-6) // 💡 1단계 액션 메뉴 호출
+								needsLayout = true; continue
 							}
 						}
 
@@ -2849,12 +3041,16 @@ if isAlt && ev.Rune() == '.' { editor.activeBuffer = (editor.activeBuffer + 1) %
 								needsLayout = true; continue
 							}
 
-							if editor.encodeMenuActive {
+						if editor.encodeMenuActive {
 								switch ev.Key() {
-									case tcell.KeyEscape: editor.encodeMenuActive = false
+									case tcell.KeyEscape: editor.encodeMenuActive = false; editor.encodeMenuState = 0
 									case tcell.KeyUp: editor.encodeMenuCursor--; if editor.encodeMenuCursor < 0 { editor.encodeMenuCursor = len(editor.encodeMenuItems) - 1 }
 									case tcell.KeyDown: editor.encodeMenuCursor++; if editor.encodeMenuCursor >= len(editor.encodeMenuItems) { editor.encodeMenuCursor = 0 }
-									case tcell.KeyEnter: action := editor.encodeMenuItems[editor.encodeMenuCursor].Action; editor.encodeMenuActive = false; if action != nil { action(editor, currentScreen) }
+									case tcell.KeyEnter: 
+										action := editor.encodeMenuItems[editor.encodeMenuCursor].Action
+										editor.encodeMenuActive = false
+										editor.encodeMenuState = 0 // 💡 상태 초기화 필수!
+										if action != nil { action(editor, currentScreen) }
 								}
 								needsLayout = true; continue
 							}
