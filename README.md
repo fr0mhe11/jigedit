@@ -85,4 +85,6 @@ sudo dnf autoremove
 - [x] extensive encoding support
 - [ ] syntex highlighting
 - [ ] multi cursor feature
+- [ ] atomic file save
+
 
