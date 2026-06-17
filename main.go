@@ -501,18 +501,19 @@ type Editor struct {
 
 	needsFullRefresh bool
 
-	prevActiveBuf  int
-	prevVOffset    int
-	prevVOffsetSub int // 🟢 [추가] 서브 래핑 줄 캐시 백업용
-	prevHOffset    int
-	prevPalette    bool
-	prevCtxMenu    bool
-	prevEncode     bool
-	prevPrompt     bool
-	prevSearch     bool
-	prevGoto       bool
-	prevReplace    bool
-	prevLinesLen   int
+	prevActiveBuf     int
+	prevVOffset       int
+	prevVOffsetSub    int // 🟢 [추가] 서브 래핑 줄 캐시 백업용
+	prevHOffset       int
+	prevPalette       bool
+	prevCtxMenu       bool
+	prevEncode        bool
+	prevPrompt        bool
+	prevSearch        bool
+	prevGoto          bool
+	prevReplace       bool
+	prevLinesLen      int
+	initialBufferUsed bool
 }
 
 type cellState struct {
@@ -3277,6 +3278,28 @@ func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
 		}
 	}
 
+	// 💡 failsafe: 대용량 파일 경고
+	fileInfo, errStat := os.Stat(absPath)
+	if errStat == nil && fileInfo.Size() > 50*1024*1024 {
+		if globalScreenHandle != nil && *globalScreenHandle != nil {
+			(*globalScreenHandle).Suspend()
+		}
+		errConfirm := zenity.Question(
+			fmt.Sprintf("파일 크기가 매우 큽니다 (%.1f MB).\n열면 속도가 느려지거나 멈출 수 있습니다. 계속 진행하시겠습니까?", float64(fileInfo.Size())/(1024*1024)),
+			zenity.Title("대용량 파일 경고"),
+			zenity.OKLabel("예"),
+			zenity.CancelLabel("아니오"),
+		)
+		if globalScreenHandle != nil && *globalScreenHandle != nil {
+			(*globalScreenHandle).Resume()
+			(*globalScreenHandle).Sync()
+		}
+		e.needsFullRefresh = true
+		if errConfirm != nil {
+			return
+		}
+	}
+
 	// 2. 새 탭으로 열기
 	b := NewBuffer()
 	b.filePath = absPath
@@ -3290,9 +3313,10 @@ func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
 		b.savedTotalChars = b.totalChars
 	}
 
-	if len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified {
+	if !e.initialBufferUsed && len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified && !e.buffers[0].isConfig {
 		e.buffers[0] = b
 		e.activeBuffer = 0
+		e.initialBufferUsed = true
 	} else {
 		e.buffers = append(e.buffers, b)
 		e.activeBuffer = len(e.buffers) - 1
@@ -3325,9 +3349,10 @@ func (e *Editor) focusOrOpenConfig(isReadOnly bool) {
 	b.savedContent = b.getContent()
 	b.savedTotalChars = b.totalChars
 
-	if len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified {
+	if !e.initialBufferUsed && len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified && !e.buffers[0].isConfig {
 		e.buffers[0] = b
 		e.activeBuffer = 0
+		e.initialBufferUsed = true
 	} else {
 		e.buffers = append(e.buffers, b)
 		e.activeBuffer = len(e.buffers) - 1
@@ -3361,7 +3386,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.1.0 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.1.1 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -3435,9 +3460,10 @@ func main() {
 			} else if action.Type == "new" { // 💡 여기서부터 추가됨
 				b := NewBuffer()
 				b.isReadOnly = action.ReadOnly
-				if len(editor.buffers) == 1 && editor.buffers[0].filePath == "" && !editor.buffers[0].isModified {
+				if !editor.initialBufferUsed && len(editor.buffers) == 1 && editor.buffers[0].filePath == "" && !editor.buffers[0].isModified && !editor.buffers[0].isConfig {
 					editor.buffers[0] = b
 					editor.activeBuffer = 0
+					editor.initialBufferUsed = true
 				} else {
 					editor.buffers = append(editor.buffers, b)
 					editor.activeBuffer = len(editor.buffers) - 1
