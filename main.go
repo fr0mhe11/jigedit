@@ -336,6 +336,7 @@ type VisualLine struct {
 	isWrapped bool
 	startCX   int
 	endCX     int
+	width     int
 }
 
 type MatchInfo struct {
@@ -372,11 +373,10 @@ type Buffer struct {
 	hOffset    int
 	isReadOnly bool
 
-	filePath     string
-	isConfig     bool
-	isModified   bool
-	savedContent string
-	encoding     string
+	filePath   string
+	isConfig   bool
+	isModified bool
+	encoding   string
 
 	searchMode   bool
 	replaceStep  int
@@ -770,7 +770,6 @@ func NewBuffer() *Buffer {
 		currentHash: emptyHash, // 💡 초기화
 		savedHash:   emptyHash, // 💡 초기화
 	}
-	b.savedContent = b.getContent()
 	b.savedTotalChars = b.totalChars
 	return b
 }
@@ -996,12 +995,28 @@ func (b *Buffer) reloadFromDisk() bool {
 		strData, _, err = readFileDetectEncoding(b.filePath)
 	}
 
-	if err != nil || strData == b.savedContent {
+	if err != nil {
+		return false
+	}
+
+	incomingLines := bytes.Split([]byte(strData), []byte("\n"))
+	for i := range incomingLines {
+		if len(incomingLines[i]) > 0 && incomingLines[i][len(incomingLines[i])-1] == '\r' {
+			incomingLines[i] = incomingLines[i][:len(incomingLines[i])-1]
+		}
+	}
+
+	var incomingHash uint64 = fnvHash([]byte{})
+	for _, l := range incomingLines {
+		incomingHash ^= fnvHash(l)
+	}
+	incomingChars := utf8.RuneCountInString(strData)
+
+	if incomingHash == b.savedHash && incomingChars == b.savedTotalChars {
 		return false
 	}
 
 	b.setLinesFromText(strData)
-	b.savedContent = b.getContent()
 	b.savedTotalChars = b.totalChars // 글자 수 완벽 동기화
 	b.lastExternalSync = time.Now()
 	b.cursor = b.clampLoc(b.cursor)
@@ -1021,7 +1036,6 @@ func (b *Buffer) reopenWithEncoding(encName string) {
 
 	b.encoding = encName
 	b.setLinesFromText(strData)
-	b.savedContent = b.getContent()
 	b.savedTotalChars = b.totalChars // 💡 글자 수 완벽 동기화 (누락 방지)
 	b.isModified = false
 	b.lastExternalSync = time.Now()
@@ -1577,19 +1591,28 @@ func (b *Buffer) ensureVCache(i int, cfg Config) []VisualLine {
 
 	var temp []VisualLine
 	if !cfg.LineWrapping || len(line) == 0 {
-		temp = []VisualLine{{isWrapped: false, startCX: 0, endCX: len(line)}}
+		width := 0
+		for i := 0; i < len(line); {
+			r, size := utf8.DecodeRune(line[i:])
+			width += fastRuneWidth(r, cfg.TabSize)
+			i += size
+		}
+		temp = []VisualLine{{isWrapped: false, startCX: 0, endCX: len(line), width: width}}
 	} else {
 		start, currentX := 0, 0
-		for cx, r := range string(line) {
+		cx := 0
+		for cx < len(line) {
+			r, size := utf8.DecodeRune(line[cx:])
 			rw := fastRuneWidth(r, cfg.TabSize)
 			if currentX+rw > textMaxWidth {
-				temp = append(temp, VisualLine{isWrapped: start > 0, startCX: start, endCX: cx})
+				temp = append(temp, VisualLine{isWrapped: start > 0, startCX: start, endCX: cx, width: currentX})
 				start = cx
 				currentX = 0
 			}
 			currentX += rw
+			cx += size
 		}
-		temp = append(temp, VisualLine{isWrapped: start > 0, startCX: start, endCX: len(line)})
+		temp = append(temp, VisualLine{isWrapped: start > 0, startCX: start, endCX: len(line), width: currentX})
 	}
 	b.vCache[i] = temp
 	return temp
@@ -2229,13 +2252,7 @@ func (e *Editor) draw(s tcell.Screen) {
 			}
 		}
 
-		vlWidth := 0
-		for i := vl.startCX; i < vl.endCX; {
-			r, size := utf8.DecodeRune(lineData[i:])
-			rw := fastRuneWidth(r, e.cfg.TabSize)
-			vlWidth += rw
-			i += size
-		}
+		vlWidth := vl.width
 
 		showLeftIndicator := b.hOffset > 0 && vlWidth > 0
 		showRightIndicator := vlWidth > b.hOffset+textMaxWidth
@@ -2757,7 +2774,6 @@ func (e *Editor) openFile(s tcell.Screen) {
 	e.fileWatcher.Add(filePath)
 
 	b.setLinesFromText(strData)
-	b.savedContent = b.getContent()
 	b.savedTotalChars = b.totalChars // 💡 글자 수 완벽 동기화 (누락 방지)
 	e.buffers = append(e.buffers, b)
 	e.activeBuffer = len(e.buffers) - 1
@@ -2779,7 +2795,6 @@ func (e *Editor) saveActiveFile(s tcell.Screen) {
 		return // 💡 실패하면 저장되었다고 마킹하지 않고 빠져나감
 	}
 
-	b.savedContent = content
 	b.markSaved()
 
 	if b.isConfig {
@@ -2816,7 +2831,6 @@ func (e *Editor) saveAsFile(s tcell.Screen) {
 		return
 	}
 
-	b.savedContent = content
 	b.markSaved()
 
 	// 💡 이름이 바뀌었다면 이전 파일의 감시를 해제하고 새 파일을 감시
@@ -2865,7 +2879,6 @@ func (e *Editor) toggleConfigBuffer() {
 	e.fileWatcher.Add(path)
 
 	configBuf.setLinesFromText(strData)
-	configBuf.savedContent = configBuf.getContent()
 	configBuf.savedTotalChars = configBuf.totalChars // 💡 추가됨
 	e.buffers = append(e.buffers, configBuf)
 	e.activeBuffer = len(e.buffers) - 1
@@ -2968,29 +2981,23 @@ func (b *Buffer) findAllMatches(overlap bool) {
 	// 💡 1줄 안에서 매치를 찾는 공통 로직 (클로저)
 	findInLine := func(lineIdx int) []MatchInfo {
 		var lineMatches []MatchInfo
-		lineStr := string(b.lines[lineIdx])
+		lineData := b.lines[lineIdx]
 		if re != nil {
-			locs := re.FindAllStringIndex(lineStr, -1)
+			locs := re.FindAllIndex(lineData, -1)
 			for _, loc := range locs {
 				lineMatches = append(lineMatches, MatchInfo{loc: Loc{lineIdx, loc[0]}, matchLen: loc[1] - loc[0]})
 			}
 		} else {
-			searchRunes := []rune(query)
-			if !b.searchCase {
-				for i := range searchRunes {
-					searchRunes[i] = unicode.ToLower(searchRunes[i])
-				}
-			}
 			offset := 0
-			for offset <= len(lineStr) {
+			for offset <= len(lineData) {
 				match := true
 				currentByteOffset := offset
 				for j := 0; j < len(searchRunes); j++ {
-					if currentByteOffset >= len(lineStr) {
+					if currentByteOffset >= len(lineData) {
 						match = false
 						break
 					}
-					tr, tsize := utf8.DecodeRuneInString(lineStr[currentByteOffset:])
+					tr, tsize := utf8.DecodeRune(lineData[currentByteOffset:])
 					sr := searchRunes[j]
 					if !b.searchCase {
 						tr = unicode.ToLower(tr)
@@ -3007,14 +3014,14 @@ func (b *Buffer) findAllMatches(overlap bool) {
 					if !overlap {
 						offset = currentByteOffset
 					} else {
-						_, size := utf8.DecodeRuneInString(lineStr[offset:])
+						_, size := utf8.DecodeRune(lineData[offset:])
 						offset += size
 					}
 				} else {
-					if offset >= len(lineStr) {
+					if offset >= len(lineData) {
 						break
 					}
-					_, size := utf8.DecodeRuneInString(lineStr[offset:])
+					_, size := utf8.DecodeRune(lineData[offset:])
 					offset += size
 				}
 			}
@@ -3309,7 +3316,6 @@ func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
 		b.encoding = encoding
 		e.fileWatcher.Add(absPath)
 		b.setLinesFromText(strData)
-		b.savedContent = b.getContent()
 		b.savedTotalChars = b.totalChars
 	}
 
@@ -3346,7 +3352,6 @@ func (e *Editor) focusOrOpenConfig(isReadOnly bool) {
 	b.isReadOnly = isReadOnly
 	e.fileWatcher.Add(path)
 	b.setLinesFromText(strData)
-	b.savedContent = b.getContent()
 	b.savedTotalChars = b.totalChars
 
 	if !e.initialBufferUsed && len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified && !e.buffers[0].isConfig {
@@ -3386,7 +3391,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.1.2 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.1.3 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -3528,22 +3533,36 @@ func main() {
 							strData, _, err = readFileDetectEncoding(filePath)
 						}
 
-						if err == nil && strData != buf.savedContent {
-							if buf.isModified {
-								editor.promptMode = true
-								editor.promptType = "external_change"
-								editor.targetCloseBuffer = i
-								needsLayout = true
-							} else {
-								if buf.reloadFromDisk() {
-									if buf.isConfig {
-										var newCfg Config
-										if err := json.Unmarshal([]byte(buf.savedContent), &newCfg); err == nil {
-											editor.cfg = newCfg
-										}
-									}
+						if err == nil {
+							incomingLines := bytes.Split([]byte(strData), []byte("\n"))
+							for i := range incomingLines {
+								if len(incomingLines[i]) > 0 && incomingLines[i][len(incomingLines[i])-1] == '\r' {
+									incomingLines[i] = incomingLines[i][:len(incomingLines[i])-1]
+								}
+							}
+							var incomingHash uint64 = fnvHash([]byte{})
+							for _, l := range incomingLines {
+								incomingHash ^= fnvHash(l)
+							}
+							incomingChars := utf8.RuneCountInString(strData)
+
+							if incomingHash != buf.savedHash || incomingChars != buf.savedTotalChars {
+								if buf.isModified {
+									editor.promptMode = true
+									editor.promptType = "external_change"
+									editor.targetCloseBuffer = i
 									needsLayout = true
-									snapToCursor = true
+								} else {
+									if buf.reloadFromDisk() {
+										if buf.isConfig {
+											var newCfg Config
+											if err := json.Unmarshal([]byte(buf.getContent()), &newCfg); err == nil {
+												editor.cfg = newCfg
+											}
+										}
+										needsLayout = true
+										snapToCursor = true
+									}
 								}
 							}
 						}
@@ -3851,14 +3870,7 @@ func main() {
 								textMaxWidth = 1
 							}
 
-							vlWidth := 0
-							lineData := b.lines[currL]
-							for i := vl.startCX; i < vl.endCX && i < len(lineData); {
-								r, size := utf8.DecodeRune(lineData[i:])
-								rw := fastRuneWidth(r, editor.cfg.TabSize)
-								vlWidth += rw
-								i += size
-							}
+							vlWidth := vl.width
 
 							leftIndX := lineNumWidth - 1
 							if lineNumWidth <= 0 {
@@ -4029,7 +4041,6 @@ func main() {
 						for _, buf := range editor.buffers {
 							if buf.isConfig {
 								buf.isModified = false
-								buf.savedContent = ""
 								buf.reloadFromDisk()
 							}
 						}
@@ -4056,7 +4067,7 @@ func main() {
 						if bufToReload.reloadFromDisk() {
 							if bufToReload.isConfig {
 								var newCfg Config
-								if err := json.Unmarshal([]byte(bufToReload.savedContent), &newCfg); err == nil {
+								if err := json.Unmarshal([]byte(bufToReload.getContent()), &newCfg); err == nil {
 									editor.cfg = newCfg
 								}
 							}
