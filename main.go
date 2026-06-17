@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"time"
 	"unicode"
@@ -106,6 +111,7 @@ func (e *Editor) closeBuffer(idx int) {
 
 	// 💡 탭을 다 닫아서 0개가 되면 에디터를 안전하게 종료합니다 (튕김 방지)
 	if len(e.buffers) == 0 {
+		shuttingDown.Store(true)
 		if globalScreenHandle != nil && *globalScreenHandle != nil {
 			(*globalScreenHandle).Fini()
 		}
@@ -260,54 +266,6 @@ func getTextEncoding(name string) encoding.Encoding {
 // 💡 KWrite(Uchardet) 수준의 통계학 기반 언어 감지 엔진
 // 💡 KWrite(Uchardet) 수준의 통계학 기반 언어 감지 엔진 (모든 인코딩 완벽 매핑)
 
-// 💡 사용자가 강제로 인코딩을 지정해서 다시 읽어오는 함수 (Reopen)
-func readFileWithEncoding(path string, encName string) (string, error) {
-	data, err := ioutil.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-
-	// 💡 [숨은 버그 완벽 수정] 사용자가 수동으로 UTF-8을 고르거나 파일 감지기가 리로드할 때,
-	// UTF-8 BOM이 존재한다면 유령 글자가 생기지 않도록 확실히 잘라냅니다!
-	if (encName == "UTF-8" || encName == "") && bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) {
-		data = data[3:]
-	}
-
-	enc := getTextEncoding(encName)
-	if enc == nil {
-		return string(data), nil // UTF-8로 폴백
-	}
-	reader := transform.NewReader(bytes.NewReader(data), enc.NewDecoder())
-	decoded, err := ioutil.ReadAll(reader)
-	if err != nil {
-		return "", err
-	}
-	return string(decoded), nil
-}
-
-// 💡 저장할 때 선택된 인코딩으로 변환하여 저장
-func saveFileWithEncoding(path string, content string, encName string) error {
-	enc := getTextEncoding(encName)
-	if enc == nil {
-		// 💡 파일 권한 유지, 심볼릭 링크 유지를 위해 원본 방식(In-place Write)으로 원상 복구!
-		return os.WriteFile(path, []byte(content), 0644)
-	}
-
-	var buf bytes.Buffer
-	writer := transform.NewWriter(&buf, enc.NewEncoder())
-	// 인코딩 변환 실패 시 에러를 뱉는 안전장치는 그대로 유지
-	if _, err := writer.Write([]byte(content)); err != nil {
-		writer.Close()
-		return fmt.Errorf("인코딩 변환 오류: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("인코딩 종료 오류: %v", err)
-	}
-
-	// 💡 원본 방식으로 복구!
-	return os.WriteFile(path, buf.Bytes(), 0644)
-}
-
 // --- [ 2. 자료구조 정의 ] ---
 
 // 💡 메모리 할당이 전혀 없는 초고속 단일 라인 체크섬 함수
@@ -363,7 +321,7 @@ type Transaction struct {
 // 💡 3. 순수하게 텍스트(lines)와 좌표(cursor)만 가지는 완벽히 분리된 Buffer
 type Buffer struct {
 	lines       [][]byte
-	vCache      [][]VisualLine // 💡 핵심: 각 줄마다 줄바꿈 상태를 기억하는 영구 캐시 배열!
+	vCache      map[int][]VisualLine // 💡 핵심: 줄바꿈 상태를 기억하는 캐시 맵 (메모리 최적화)
 	cursor      Loc
 	selection   Range
 	isSelecting bool
@@ -427,11 +385,15 @@ type Buffer struct {
 	savedTotalChars int
 
 	// 💡 [추가] O(1) Net Change 감지용 체크섬 필드
-	currentHash uint64
-	savedHash   uint64
+	currentHash     uint64
+	savedHash       uint64
+	savedStrongHash uint64
 
-	stickToWrapEnd bool
-	dirtyStartL    int // 🟢 [추가됨] 내용이 변경된 가장 윗줄 번호 기록
+	stickToWrapEnd  bool
+	dirtyStartL     int  // 🟢 [추가됨] 내용이 변경된 가장 윗줄 번호 기록
+	endsWithNewline bool // 💡 파일 끝 개행 보존용 플래그
+	savedModTime    time.Time
+	savedSize       int64
 }
 type PaletteItem struct {
 	Name     string
@@ -466,8 +428,9 @@ type Editor struct {
 	paletteH  int
 
 	// 🟢 여기에 아래 코드를 붙여넣으세요.
-	targetCloseBuffer int
-	targetEncoding    string // 💡 다시 열기 시 사용자가 선택한 인코딩 기억
+	targetCloseBuffer   int
+	externalChangeQueue []int
+	targetEncoding      string // 💡 다시 열기 시 사용자가 선택한 인코딩 기억
 
 	ctxMenuActive bool
 	ctxMenuItems  []PaletteItem
@@ -548,6 +511,15 @@ func NewEditor() *Editor {
 }
 
 func (e *Editor) listenFileChanges() {
+	timers := make(map[string]*time.Timer)
+	var mu sync.Mutex
+	defer func() {
+		mu.Lock()
+		for _, t := range timers {
+			t.Stop()
+		}
+		mu.Unlock()
+	}()
 	for {
 		select {
 		case event, ok := <-e.fileWatcher.Events:
@@ -555,10 +527,24 @@ func (e *Editor) listenFileChanges() {
 				return
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
-				// 💡 탭 배열(e.buffers)을 여기서 읽지 않고, 메인 스레드로 파일 경로만 안전하게 넘깁니다.
-				if globalScreenHandle != nil && *globalScreenHandle != nil {
-					(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt(event.Name))
+				name := event.Name
+				mu.Lock()
+				if t, exists := timers[name]; exists {
+					t.Reset(300 * time.Millisecond)
+				} else {
+					timers[name] = time.AfterFunc(300*time.Millisecond, func() {
+						if shuttingDown.Load() {
+							return
+						}
+						if globalScreenHandle != nil && *globalScreenHandle != nil {
+							(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt(name))
+						}
+						mu.Lock()
+						delete(timers, name)
+						mu.Unlock()
+					})
 				}
+				mu.Unlock()
 			}
 		case err, ok := <-e.fileWatcher.Errors:
 			if !ok {
@@ -722,25 +708,16 @@ func (b *Buffer) clampLoc(loc Loc) Loc {
 	return loc
 }
 
-// 💡 텍스트를 파일이나 문자열에서 읽어와 순수 2차원 배열로 세팅
-func (b *Buffer) setLinesFromText(strData string) {
-	strData = strings.ReplaceAll(strData, "\r", "")
-	parts := strings.Split(strData, "\n")
-	newLines := make([][]byte, len(parts))
-
-	var th uint64 = 0 // 💡 전체 줄의 해시를 XOR로 누적
-	for i, p := range parts {
-		newLines[i] = []byte(p)
-		th ^= fnvHash(newLines[i])
+func (b *Buffer) alignToRuneBoundary(loc Loc) Loc {
+	loc = b.clampLoc(loc)
+	line := b.lines[loc.L]
+	if len(line) == 0 || loc.C == 0 || loc.C == len(line) {
+		return loc
 	}
-	b.lines = newLines
-	b.vCache = make([][]VisualLine, len(newLines)) // 💡 초기화
-	b.vLinesValid = false
-	b.totalChars = utf8.RuneCountInString(strData)
-
-	b.currentHash = th // 💡 현재 해시 저장
-	b.savedHash = th   // 💡 저장용 해시 동기화
-	b.clearSelection() // 🟢 [추가] 선택 영역 안전 초기화로 유령 좌표 방지!
+	for loc.C > 0 && loc.C < len(line) && (line[loc.C]&0xC0) == 0x80 {
+		loc.C--
+	}
+	return loc
 }
 
 func (b *Buffer) getContent() string {
@@ -762,15 +739,17 @@ func (b *Buffer) getContent() string {
 func NewBuffer() *Buffer {
 	emptyHash := fnvHash([]byte{})
 	b := &Buffer{
-		lines:       [][]byte{{}},
-		vCache:      [][]VisualLine{nil}, // 💡 초기화
-		cursor:      Loc{L: 0, C: 0},
-		encoding:    "UTF-8",
-		dirtyStartL: -1,        // 🟢 [추가됨] -1은 변경 사항 없음(Clean)을 의미
-		currentHash: emptyHash, // 💡 초기화
-		savedHash:   emptyHash, // 💡 초기화
+		lines:           [][]byte{{}},
+		vCache:          make(map[int][]VisualLine), // 💡 초기화
+		cursor:          Loc{L: 0, C: 0},
+		encoding:        "UTF-8",
+		dirtyStartL:     -1,        // 🟢 [추가됨] -1은 변경 사항 없음(Clean)을 의미
+		currentHash:     emptyHash, // 💡 초기화
+		savedHash:       emptyHash, // 💡 초기화
+		endsWithNewline: true,      // 💡 새 파일은 기본적으로 개행 종료로 가정
 	}
 	b.savedTotalChars = b.totalChars
+	b.savedStrongHash = b.computeStrongHash()
 	return b
 }
 
@@ -788,13 +767,46 @@ func (b *Buffer) checkModified() {
 		return
 	}
 
-	// 2. 💡 [핵심] 트랜잭션이 달라도 실제 글자 수와 본문 체크섬 해시가 일치하면 Clean! (수동 Net-Change 제로 감지)
-	if b.currentHash == b.savedHash && b.totalChars == b.savedTotalChars {
-		b.isModified = false
+	// 2. 빠른 부정: XOR 또는 글자수가 다르면 확실히 수정됨 (O(1))
+	if b.currentHash != b.savedHash || b.totalChars != b.savedTotalChars {
+		b.isModified = true
 		return
 	}
 
-	b.isModified = true
+	// 3. 의심 구간(재배열 가능성): 순서 민감 강해시로 확정 (O(N), 희소)
+	b.isModified = b.computeStrongHash() != b.savedStrongHash
+}
+
+func (b *Buffer) updateSavedFileInfo() {
+	if b.filePath == "" {
+		return
+	}
+	if info, err := os.Stat(b.filePath); err == nil {
+		b.savedModTime = info.ModTime()
+		b.savedSize = info.Size()
+	}
+}
+
+func (b *Buffer) computeStrongHash() uint64 {
+	var h uint64 = 14695981039346656037
+	mix := func(p []byte) {
+		for _, c := range p {
+			h ^= uint64(c)
+			h *= 1099511628211
+		}
+	}
+	for i, line := range b.lines {
+		mix(line)
+		if i < len(b.lines)-1 {
+			h ^= uint64('\n')
+			h *= 1099511628211
+		}
+	}
+	if b.endsWithNewline && len(b.lines) > 0 {
+		h ^= uint64('\n')
+		h *= 1099511628211
+	}
+	return h
 }
 
 func (b *Buffer) markSaved() {
@@ -805,7 +817,9 @@ func (b *Buffer) markSaved() {
 	}
 	b.savedTotalChars = b.totalChars // 💡 저장 당시 글자 수 기록
 	b.savedHash = b.currentHash      // 💡 저장 시점의 체크섬 낙인 점찍기
+	b.savedStrongHash = b.computeStrongHash()
 	b.isModified = false
+	b.updateSavedFileInfo()
 }
 
 // 💡 chardet 결과를 우리 에디터 이름으로 변환해주는 헬퍼 함수
@@ -858,128 +872,218 @@ func mapChardetToOurs(charset string) string {
 // 💡 KWrite(Uchardet) + 아시아 언어 엄격 교차 검증 하이브리드 엔진
 // 💡 통계(chardet) + 실전 디코딩 검증(Validation) 하이브리드 엔진
 // 💡 상용 에디터급 종결 엔진: 8KB 샘플링 최적화 + 디코딩 실증 검증
-func readFileDetectEncoding(path string) (string, string, error) {
+
+// 💡 대용량 파일용 스트리밍 라인 로더 (Peak 메모리 최소화)
+func loadFileLines(path string, forcedEncoding string) (lines [][]byte, encoding string, totalChars int, hash uint64, endsWithNewline bool, err error) {
 	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
-		return "", "", fmt.Errorf("일반 파일이 아닙니다")
+		return nil, "", 0, 0, false, fmt.Errorf("일반 파일이 아닙니다")
 	}
 
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return "", "", err
+		return nil, "", 0, 0, false, err
+	}
+	defer f.Close()
+
+	// 1. 인코딩 감지용 샘플링 (최대 8KB)
+	sample := make([]byte, 8192)
+	n, err := f.Read(sample)
+	if err != nil && err != io.EOF {
+		return nil, "", 0, 0, false, err
+	}
+	sample = sample[:n]
+
+	// 파일 포인터 초기화
+	_, err = f.Seek(0, 0)
+	if err != nil {
+		return nil, "", 0, 0, false, err
 	}
 
-	if len(data) == 0 {
-		return "", "UTF-8", nil
-	}
-
-	// 1. BOM (Byte Order Mark) 검사
-	if bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) {
-		return string(data[3:]), "UTF-8", nil
-	}
-	if bytes.HasPrefix(data, []byte{0xFF, 0xFE}) {
-		decoded, _ := ioutil.ReadAll(transform.NewReader(bytes.NewReader(data), getTextEncoding("UTF-16 LE").NewDecoder()))
-		return string(decoded), "UTF-16 LE", nil
-	}
-	if bytes.HasPrefix(data, []byte{0xFE, 0xFF}) {
-		decoded, _ := ioutil.ReadAll(transform.NewReader(bytes.NewReader(data), getTextEncoding("UTF-16 BE").NewDecoder()))
-		return string(decoded), "UTF-16 BE", nil
-	}
-
-	// 2. 순수 UTF-8 검증 (전체 파일 대상)
-	if utf8.Valid(data) {
-		return string(data), "UTF-8", nil
-	}
-
-	// =================================================================
-	// 🚀 최적화 핵심: 파일 전체가 아닌 최대 8KB만 잘라서 샘플(Sample)로 사용!
-	// =================================================================
-	sampleSize := 8192
-	var sample []byte
-	if len(data) > sampleSize {
-		sample = data[:sampleSize]
-	} else {
-		sample = data
-	}
-
-	hasHighBit := false
-	for _, b := range sample {
-		if b > 127 {
-			hasHighBit = true
-			break
-		}
-	}
-
-	// 3. 샘플 데이터로 통계학 엔진 가동 (0.001초 컷)
-	detector := chardet.NewTextDetector()
-	results, err := detector.DetectAll(sample)
-
-	bestEncName := "UTF-8"
-	var minErrorCount = -1
-	var fallbackEncName string
-
-	if err == nil && len(results) > 0 {
-		for _, res := range results {
-			mapped := mapChardetToOurs(res.Charset)
-			if mapped == "" {
-				continue
+	detectedEnc := "UTF-8"
+	if len(sample) > 0 {
+		if bytes.HasPrefix(sample, []byte{0xEF, 0xBB, 0xBF}) {
+			detectedEnc = "UTF-8"
+			_, _ = f.Seek(3, 0)
+		} else if bytes.HasPrefix(sample, []byte{0xFF, 0xFE}) {
+			detectedEnc = "UTF-16 LE"
+			_, _ = f.Seek(2, 0)
+		} else if bytes.HasPrefix(sample, []byte{0xFE, 0xFF}) {
+			detectedEnc = "UTF-16 BE"
+			_, _ = f.Seek(2, 0)
+		} else if utf8.Valid(sample) {
+			detectedEnc = "UTF-8"
+		} else {
+			hasHighBit := false
+			for _, b := range sample {
+				if b > 127 {
+					hasHighBit = true
+					break
+				}
 			}
+			detector := chardet.NewTextDetector()
+			results, err := detector.DetectAll(sample)
+			bestEncName := "UTF-8"
+			var minErrorCount = -1
+			var fallbackEncName string
 
-			// 서유럽어 오탐지 무시
-			isWestern := strings.HasPrefix(mapped, "ISO-8859") || strings.HasPrefix(mapped, "CP125")
-			if hasHighBit && isWestern {
-				continue
+			if err == nil && len(results) > 0 {
+				for _, res := range results {
+					mapped := mapChardetToOurs(res.Charset)
+					if mapped == "" {
+						continue
+					}
+					isWestern := strings.HasPrefix(mapped, "ISO-8859") || strings.HasPrefix(mapped, "CP125")
+					if hasHighBit && isWestern {
+						continue
+					}
+					enc := getTextEncoding(mapped)
+					if enc == nil {
+						continue
+					}
+					sampleDecoded, decErr := ioutil.ReadAll(transform.NewReader(bytes.NewReader(sample), enc.NewDecoder()))
+					if decErr != nil {
+						continue
+					}
+					errorCount := bytes.Count(sampleDecoded, []byte("\uFFFD"))
+					if errorCount == 0 {
+						bestEncName = mapped
+						break
+					}
+					if minErrorCount == -1 || errorCount < minErrorCount {
+						minErrorCount = errorCount
+						fallbackEncName = mapped
+					}
+				}
 			}
-
-			enc := getTextEncoding(mapped)
-			if enc == nil {
-				continue
-			}
-
-			// 💡 샘플 데이터(8KB)만 변환해서 깨진 글자 검사! (메모리 낭비 X)
-			sampleDecoded, decErr := ioutil.ReadAll(transform.NewReader(bytes.NewReader(sample), enc.NewDecoder()))
-			if decErr != nil {
-				continue
-			}
-
-			errorCount := bytes.Count(sampleDecoded, []byte("\uFFFD"))
-
-			// 에러가 0개면 완벽한 정답!
-			if errorCount == 0 {
-				bestEncName = mapped
-				goto DECODE_FULL_FILE // 정답을 찾았으니 즉시 파일 전체 변환으로 직행
-			}
-
-			if minErrorCount == -1 || errorCount < minErrorCount {
-				minErrorCount = errorCount
-				fallbackEncName = mapped
+			if fallbackEncName != "" && minErrorCount < len(sample)/10 {
+				detectedEnc = fallbackEncName
+			} else if hasHighBit {
+				detectedEnc = "CP949 (EUC-KR)"
+			} else {
+				detectedEnc = bestEncName
 			}
 		}
 	}
 
-	// 4. 완벽한 후보가 없다면, 에러가 제일 적었던 언어 채택
-	if fallbackEncName != "" && minErrorCount < len(sample)/10 {
-		bestEncName = fallbackEncName
-	} else if hasHighBit {
-		// 최후의 보루: 다 실패하면 한국어로 강제
-		bestEncName = "CP949 (EUC-KR)"
+	// 강제 인코딩 지정이 있는 경우 덮어쓰기
+	if forcedEncoding != "" {
+		detectedEnc = forcedEncoding
 	}
 
-DECODE_FULL_FILE:
-	// =================================================================
-	// 5. 확정된 인코딩으로 "원본 전체(data)"를 딱 한 번만 디코딩합니다.
-	// =================================================================
-	if bestEncName != "UTF-8" {
-		enc := getTextEncoding(bestEncName)
+	var r io.Reader = f
+	if detectedEnc != "UTF-8" {
+		enc := getTextEncoding(detectedEnc)
 		if enc != nil {
-			decodedBytes, err := ioutil.ReadAll(transform.NewReader(bytes.NewReader(data), enc.NewDecoder()))
-			if err == nil {
-				return string(decodedBytes), bestEncName, nil
+			r = transform.NewReader(f, enc.NewDecoder())
+		}
+	}
+
+	// 2. bufio 스트리밍 라인 스캔 및 XOR 해시 계산
+	reader := bufio.NewReader(r)
+	hash = fnvHash([]byte{})
+	lines = make([][]byte, 0, 1024)
+	endsWithNewline = false
+
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if line[len(line)-1] == '\n' {
+				endsWithNewline = true
+				line = line[:len(line)-1]
+			} else {
+				endsWithNewline = false
+			}
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+
+			// Go GC 메모리 압박 완화를 위해 필요시 슬라이스 용량 축소
+			if cap(line) > len(line)+8 {
+				trimmed := make([]byte, len(line))
+				copy(trimmed, line)
+				line = trimmed
+			}
+
+			totalChars += utf8.RuneCount(line)
+			hash ^= fnvHash(line)
+			lines = append(lines, line)
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, "", 0, 0, false, err
+		}
+	}
+
+	if len(lines) == 0 {
+		lines = [][]byte{{}}
+	}
+
+	return lines, detectedEnc, totalChars, hash, endsWithNewline, nil
+}
+
+// 💡 대용량 파일용 스트리밍 라이터 (Peak 메모리 최소화)
+func (b *Buffer) saveToFile(path string) error {
+	// 💡 인코딩 변환 무결성 사전 검증 (파일 파괴 방지)
+	if b.encoding != "" && b.encoding != "UTF-8" {
+		enc := getTextEncoding(b.encoding)
+		if enc != nil {
+			validator := transform.NewWriter(ioutil.Discard, enc.NewEncoder())
+			for i, line := range b.lines {
+				if _, err := validator.Write(line); err != nil {
+					return fmt.Errorf("인코딩 변환 실패 (저장 중단됨): %v", err)
+				}
+				if i < len(b.lines)-1 {
+					if _, err := validator.Write([]byte{'\n'}); err != nil {
+						return fmt.Errorf("인코딩 변환 실패 (저장 중단됨): %v", err)
+					}
+				}
+			}
+			if err := validator.Close(); err != nil {
+				return fmt.Errorf("인코딩 변환 실패 (저장 중단됨): %v", err)
 			}
 		}
 	}
 
-	// 최후의 최후 폴백
-	return string(data), "UTF-8", nil
+	var perm os.FileMode = 0644
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var w io.Writer = f
+	if b.encoding != "" && b.encoding != "UTF-8" {
+		enc := getTextEncoding(b.encoding)
+		if enc != nil {
+			w = transform.NewWriter(f, enc.NewEncoder())
+		}
+	}
+
+	bufWriter := bufio.NewWriterSize(w, 1<<20)
+	for i, line := range b.lines {
+		_, err = bufWriter.Write(line)
+		if err != nil {
+			return err
+		}
+		if i < len(b.lines)-1 {
+			_, err = bufWriter.Write([]byte{'\n'})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if b.endsWithNewline && len(b.lines) > 0 {
+		_, err = bufWriter.Write([]byte{'\n'})
+		if err != nil {
+			return err
+		}
+	}
+	return bufWriter.Flush()
 }
 
 func (b *Buffer) reloadFromDisk() bool {
@@ -987,56 +1091,73 @@ func (b *Buffer) reloadFromDisk() bool {
 		return false
 	}
 
-	var strData string
-	var err error
-	if b.encoding != "" && b.encoding != "UTF-8" {
-		strData, err = readFileWithEncoding(b.filePath, b.encoding)
-	} else {
-		strData, _, err = readFileDetectEncoding(b.filePath)
-	}
-
+	lines, encoding, totalChars, hash, endsWithNewline, err := loadFileLines(b.filePath, b.encoding)
 	if err != nil {
 		return false
 	}
 
-	incomingLines := bytes.Split([]byte(strData), []byte("\n"))
-	for i := range incomingLines {
-		if len(incomingLines[i]) > 0 && incomingLines[i][len(incomingLines[i])-1] == '\r' {
-			incomingLines[i] = incomingLines[i][:len(incomingLines[i])-1]
-		}
-	}
-
-	var incomingHash uint64 = fnvHash([]byte{})
-	for _, l := range incomingLines {
-		incomingHash ^= fnvHash(l)
-	}
-	incomingChars := utf8.RuneCountInString(strData)
-
-	if incomingHash == b.savedHash && incomingChars == b.savedTotalChars {
+	if hash == b.savedHash && totalChars == b.savedTotalChars {
 		return false
 	}
 
-	b.setLinesFromText(strData)
-	b.savedTotalChars = b.totalChars // 글자 수 완벽 동기화
-	b.lastExternalSync = time.Now()
-	b.cursor = b.clampLoc(b.cursor)
-	b.undoStack = nil
-	b.redoStack = nil
-	b.isSelecting = false
-	b.txIDCounter = 0
-	b.savedTxID = 0
+	b.reloadFromLines(lines, encoding, totalChars, hash, endsWithNewline)
+	debug.FreeOSMemory() // 💡 로딩 직후 OS에 즉각 메모리 반환
 	return true
 }
 
+func (b *Buffer) reloadFromLines(lines [][]byte, encoding string, totalChars int, hash uint64, endsWithNewline bool) {
+	wasReadOnly := b.isReadOnly
+	b.isReadOnly = false // 💡 일시적으로 읽기 전용 해제하여 외부 덮어쓰기 허용
+
+	oldLines := b.lines
+	b.BeginTransaction()
+	lastL := len(oldLines) - 1
+	lastC := 0
+	if lastL >= 0 {
+		lastC = len(oldLines[lastL])
+	}
+	b.DeleteTextWithRecord(Loc{0, 0}, Loc{lastL, lastC})
+
+	newText := string(bytes.Join(lines, []byte{'\n'}))
+	b.InsertTextWithRecord(Loc{0, 0}, newText)
+	b.EndTransaction()
+
+	b.isReadOnly = wasReadOnly // 💡 원래 상태로 복구
+
+	b.encoding = encoding
+	b.vCache = make(map[int][]VisualLine)
+	b.vLinesValid = false
+	b.totalChars = totalChars
+	b.savedTotalChars = totalChars
+	b.currentHash = hash
+	b.savedHash = hash
+	b.endsWithNewline = endsWithNewline
+	b.savedStrongHash = b.computeStrongHash()
+	b.lastExternalSync = time.Now()
+	b.cursor = b.clampLoc(b.cursor)
+	// 💡 UX 개선: 외부 리로드 시 undoStack을 초기화하지 않고 단일 트랜잭션으로 보존
+	b.isSelecting = false
+	b.isModified = false // 💡 디스크 내용과 동일하므로 수정 상태 해제
+	b.savedTxID = b.txIDCounter
+	b.updateSavedFileInfo()
+}
+
 func (b *Buffer) reopenWithEncoding(encName string) {
-	strData, err := readFileWithEncoding(b.filePath, encName)
+	lines, encoding, totalChars, hash, endsWithNewline, err := loadFileLines(b.filePath, encName)
 	if err != nil {
 		return
 	}
 
-	b.encoding = encName
-	b.setLinesFromText(strData)
-	b.savedTotalChars = b.totalChars // 💡 글자 수 완벽 동기화 (누락 방지)
+	b.lines = lines
+	b.encoding = encoding
+	b.vCache = make(map[int][]VisualLine)
+	b.vLinesValid = false
+	b.totalChars = totalChars
+	b.savedTotalChars = totalChars
+	b.currentHash = hash
+	b.savedHash = hash
+	b.endsWithNewline = endsWithNewline
+	b.savedStrongHash = b.computeStrongHash()
 	b.isModified = false
 	b.lastExternalSync = time.Now()
 	b.cursor = Loc{0, 0}
@@ -1048,6 +1169,8 @@ func (b *Buffer) reopenWithEncoding(encName string) {
 	b.isSelecting = false
 	b.txIDCounter = 0
 	b.savedTxID = 0
+	b.updateSavedFileInfo()
+	debug.FreeOSMemory() // 💡 메모리 즉각 정리
 }
 
 func (b *Buffer) Insert(loc Loc, text string) Loc {
@@ -1075,7 +1198,6 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 		}
 	}
 	newLines = append(newLines, append([]byte(nil), textBytes[start:]...))
-	newCache := make([][]VisualLine, len(newLines))
 
 	if len(newLines) == 1 {
 		line := b.lines[loc.L]
@@ -1084,12 +1206,14 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 		newLine = append(newLine, newLines[0]...)
 		newLine = append(newLine, line[loc.C:]...)
 		b.lines[loc.L] = newLine
-		b.vCache[loc.L] = nil // 💡 수정한 줄의 캐시 무효화
 
 		// 💡 [해시 증분] 변경이 완료된 단일 행의 새 해시를 주입
 		b.currentHash ^= fnvHash(b.lines[loc.L])
+		delete(b.vCache, loc.L) // 💡 단일 라인만 선택적 무효화
 		return Loc{L: loc.L, C: loc.C + len(newLines[0])}
 	}
+
+	b.vCache = make(map[int][]VisualLine) // 💡 줄 바꿈 추가가 수반되므로 전체 캐시 무효화
 
 	originalLine := b.lines[loc.L]
 	tail := append([]byte(nil), originalLine[loc.C:]...)
@@ -1098,7 +1222,6 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 	firstLine = append(firstLine, newLines[0]...)
 
 	b.lines[loc.L] = firstLine
-	b.vCache[loc.L] = nil // 💡 캐시 무효화
 
 	// 💡 [해시 증분] 쪼개진 첫 번째 줄의 새 해시 주입
 	b.currentHash ^= fnvHash(b.lines[loc.L])
@@ -1113,13 +1236,9 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 	// 💡 최적화: O(N) 임시 슬라이스 할당(Double Copy)을 방지하는 In-place Shift
 	addLen := len(newLines) - 1
 	b.lines = append(b.lines, make([][]byte, addLen)...)
-	b.vCache = append(b.vCache, make([][]VisualLine, addLen)...)
 
 	copy(b.lines[loc.L+addLen+1:], b.lines[loc.L+1:])
-	copy(b.vCache[loc.L+addLen+1:], b.vCache[loc.L+1:])
-
 	copy(b.lines[loc.L+1:], newLines[1:])
-	copy(b.vCache[loc.L+1:], newCache[1:])
 
 	return Loc{L: loc.L + len(newLines) - 1, C: len(newLines[len(newLines)-1]) - len(tail)}
 }
@@ -1147,13 +1266,15 @@ func (b *Buffer) Remove(start, end Loc) string {
 		newLine = append(newLine, line[:start.C]...)
 		newLine = append(newLine, line[end.C:]...)
 		b.lines[start.L] = newLine
-		b.vCache[start.L] = nil // 💡 캐시 무효화
 		b.totalChars -= utf8.RuneCountInString(deleted)
 
 		// 💡 [해시 증분] 데이터가 잘려 나간 행의 새 해시 주입
 		b.currentHash ^= fnvHash(b.lines[start.L])
+		delete(b.vCache, start.L) // 💡 단일 라인만 선택적 무효화
 		return deleted
 	}
+
+	b.vCache = make(map[int][]VisualLine) // 💡 줄 수가 변동되므로 전체 캐시 무효화
 
 	// 💡 [해시 증분] 다중 행 삭제 시작. 범위 내에 걸쳐있는 모든 행의 기존 해시를 통째로 제거
 	for i := start.L; i <= end.L; i++ {
@@ -1184,7 +1305,6 @@ func (b *Buffer) Remove(start, end Loc) string {
 	newLine = append(newLine, lineStart[:start.C]...)
 	newLine = append(newLine, lineEnd[end.C:]...)
 	b.lines[start.L] = newLine
-	b.vCache[start.L] = nil // 💡 캐시 무효화
 
 	// 💡 [해시 증분] 두 줄이 병합되어 살아남은 첫 줄의 새 해시 주입
 	b.currentHash ^= fnvHash(b.lines[start.L])
@@ -1192,12 +1312,10 @@ func (b *Buffer) Remove(start, end Loc) string {
 	// 💡 최적화: 임시 배열 생성 없이 제자리에서 잘라내기 병합 (단일 복사)
 	oldLen := len(b.lines)
 	b.lines = append(b.lines[:start.L+1], b.lines[end.L+1:]...)
-	b.vCache = append(b.vCache[:start.L+1], b.vCache[end.L+1:]...)
 
 	// 💡 메모리 누수 방지: 슬라이스 축소 후 꼬리 부분에 남은 포인터들을 nil로 초기화 (GC 수거 지원)
 	for i := len(b.lines); i < oldLen; i++ {
 		b.lines[:cap(b.lines)][i] = nil
-		b.vCache[:cap(b.vCache)][i] = nil
 	}
 
 	deletedStr := string(deletedBytes)
@@ -1268,7 +1386,7 @@ func (b *Buffer) EndTransaction() {
 					// 2-2. Delete 키 방향 (현재 지운 범위의 시작이, 이전에 지운 범위의 시작점과 같을 때)
 					if currAct.Start == lastAct.Start {
 						lastAct.Text = lastAct.Text + currAct.Text
-						lastAct.End = Loc{L: lastAct.Start.L, C: lastAct.Start.C + utf8.RuneCountInString(lastAct.Text)}
+						lastAct.End = Loc{L: lastAct.Start.L, C: lastAct.Start.C + len(lastAct.Text)}
 						lastTx.AfterLoc = b.cursor
 						lastTx.Time = b.currentTx.Time
 						b.redoStack = nil
@@ -1284,11 +1402,32 @@ func (b *Buffer) EndTransaction() {
 		b.undoStack = append(b.undoStack, *b.currentTx)
 		b.redoStack = nil
 
+		// Limit undo memory usage (max 256MB)
+		const maxUndoBytes = 256 << 20
+		evicted := false
+		for len(b.undoStack) > 1 {
+			totalBytes := 0
+			for _, tx := range b.undoStack {
+				for _, a := range tx.Actions {
+					totalBytes += len(a.Text)
+				}
+			}
+			if totalBytes <= maxUndoBytes {
+				break
+			}
+			b.undoStack = b.undoStack[1:]
+			evicted = true
+		}
+
 		// 💡 메모리 누수 방지: 단순 슬라이싱은 기존 배열이 메모리에 남게 되므로,
 		// 완전히 새로운 슬라이스로 복사(Copy)하여 가비지 컬렉터(GC)가 예전 메모리를 회수하게 함.
 		if len(b.undoStack) > 1000 {
 			newStack := make([]Transaction, 0, 800)
 			newStack = append(newStack, b.undoStack[len(b.undoStack)-800:]...)
+			b.undoStack = newStack
+		} else if evicted {
+			newStack := make([]Transaction, len(b.undoStack))
+			copy(newStack, b.undoStack)
 			b.undoStack = newStack
 		}
 		b.checkModified()
@@ -1322,6 +1461,10 @@ func (b *Buffer) DeleteSelection() bool {
 	start, end := b.getSelectionRange()
 	start = b.clampLoc(start) // 🟢 [추가] 삭제 시 좌표 이중 보정
 	end = b.clampLoc(end)     // 🟢 [추가] 삭제 시 좌표 이중 보정
+	if start == end {
+		b.clearSelection()
+		return false
+	}
 	b.DeleteTextWithRecord(start, end)
 	b.clearSelection()
 	return true
@@ -1579,8 +1722,11 @@ func (b *Buffer) getLineNumWidth(cfg Config) int {
 // 🟢 [변경] 특정 물리 줄의 visual line 캐시가 비어 있으면 동적으로 계산해주는 헬퍼
 // 🟢 [변경] 특정 물리 줄의 visual line 캐시가 비어 있으면 동적으로 계산해주는 헬퍼
 func (b *Buffer) ensureVCache(i int, cfg Config) []VisualLine {
-	if b.vCache[i] != nil {
-		return b.vCache[i]
+	if b.vCache == nil {
+		b.vCache = make(map[int][]VisualLine)
+	}
+	if val, ok := b.vCache[i]; ok {
+		return val
 	}
 	line := b.lines[i]
 	lineNumWidth := b.getLineNumWidth(cfg)
@@ -1620,10 +1766,11 @@ func (b *Buffer) ensureVCache(i int, cfg Config) []VisualLine {
 
 // 🟢 [변경] O(1) 크기 무효화만 수행
 func (b *Buffer) generateVisualLines(maxWidth int, cfg Config) []VisualLine {
-	if b.cachedMaxWidth != maxWidth || b.cachedConfig.LineWrapping != cfg.LineWrapping || b.cachedConfig.TabSize != cfg.TabSize {
-		for i := range b.vCache {
-			b.vCache[i] = nil
-		}
+	if b.vCache == nil {
+		b.vCache = make(map[int][]VisualLine)
+	}
+	if b.cachedMaxWidth != maxWidth || b.cachedConfig.LineWrapping != cfg.LineWrapping || b.cachedConfig.TabSize != cfg.TabSize || b.cachedConfig.ShowLineNumbers != cfg.ShowLineNumbers || len(b.vCache) > 1000 {
+		b.vCache = make(map[int][]VisualLine) // 💡 맵 초기화
 		b.cachedMaxWidth = maxWidth
 		b.cachedConfig = cfg
 
@@ -1794,7 +1941,7 @@ func (b *Buffer) screenToMemoryPosV(mx, my, tabHeight int, cfg Config) Loc {
 
 	relativeY := my - tabHeight
 	if relativeY < 0 {
-		return Loc{0, 0}
+		relativeY = 0
 	}
 
 	currL := b.vOffsetL
@@ -1819,23 +1966,60 @@ func (b *Buffer) screenToMemoryPosV(mx, my, tabHeight int, cfg Config) Loc {
 		currL = len(b.lines) - 1
 	}
 	b.ensureVCache(currL, cfg)
-	vl := b.vCache[currL][currSub]
+	subLines := b.vCache[currL]
+	if len(subLines) == 0 {
+		return Loc{currL, 0}
+	}
+	if currSub >= len(subLines) {
+		currSub = len(subLines) - 1
+	}
+	if currSub < 0 {
+		currSub = 0
+	}
+	vl := subLines[currSub]
+
+	line := b.lines[currL]
+
+	safeStart := vl.startCX
+	if safeStart < 0 {
+		safeStart = 0
+	}
+	if safeStart > len(line) {
+		safeStart = len(line)
+	}
+
+	safeEnd := vl.endCX
+	if safeEnd < safeStart {
+		safeEnd = safeStart
+	}
+	if safeEnd > len(line) {
+		safeEnd = len(line)
+	}
 
 	relativeX := mx - lineNumWidth + b.hOffset
 	if relativeX <= 0 {
-		return Loc{currL, vl.startCX}
+		return Loc{currL, safeStart}
 	}
 
 	currentX := 0
-	line := b.lines[currL]
 
-	for i := vl.startCX; i < vl.endCX && i < len(line); {
+	for i := safeStart; i < safeEnd; {
+		if i >= len(line) {
+			break
+		}
 		r, size := utf8.DecodeRune(line[i:])
+		if size <= 0 || i+size > len(line) {
+			break
+		}
 		rw := fastRuneWidth(r, cfg.TabSize)
 
 		if relativeX >= currentX && relativeX < currentX+rw {
 			if rw > 1 && relativeX >= currentX+(rw/2)+(rw%2) {
-				return Loc{currL, i + size}
+				nextPos := i + size
+				if nextPos > len(line) {
+					nextPos = len(line)
+				}
+				return Loc{currL, nextPos}
 			}
 			return Loc{currL, i}
 		}
@@ -1843,11 +2027,7 @@ func (b *Buffer) screenToMemoryPosV(mx, my, tabHeight int, cfg Config) Loc {
 		i += size
 	}
 
-	endC := vl.endCX
-	if endC > len(line) {
-		endC = len(line)
-	}
-	return Loc{currL, endC}
+	return Loc{currL, safeEnd}
 }
 
 // 🟢 [추가] 위/아래(Up/Down/PgUp/PgDn) 키를 눌렀을 때, 누적합 없이 인접 가상라인으로 커서를 안전하게 옮기는 O(1) 헬퍼
@@ -2322,7 +2502,11 @@ func (e *Editor) draw(s tcell.Screen) {
 		} else if e.promptType == "close_config" {
 			promptMsg = " [Warning] 설정이 저장되지 않았습니다. 무시하고 닫을까요? (y/n)"
 		} else if e.promptType == "external_change" {
-			promptMsg = " [Warning] 파일이 외부에서 변경되었습니다. 디스크 내용으로 덮어쓸까요? (y/n)"
+			fileName := ""
+			if e.targetCloseBuffer >= 0 && e.targetCloseBuffer < len(e.buffers) {
+				fileName = filepath.Base(e.buffers[e.targetCloseBuffer].filePath)
+			}
+			promptMsg = fmt.Sprintf(" [Warning] '%s' 파일이 외부에서 변경되었습니다. 디스크 내용으로 덮어쓸까요? (y/n)", fileName)
 		} else if e.promptType == "alert" {
 			promptMsg = " [Alert] " + e.alertMessage + " (Enter/Esc)"
 		}
@@ -2729,6 +2913,7 @@ func runeSliceEqual(a, b []rune) bool {
 }
 
 var globalScreenHandle *tcell.Screen
+var shuttingDown atomic.Bool
 
 func (e *Editor) openFile(s tcell.Screen) {
 	s.Suspend()
@@ -2761,22 +2946,31 @@ func (e *Editor) openFile(s tcell.Screen) {
 		}
 	}
 
-	strData, encoding, err := readFileDetectEncoding(filePath)
+	lines, encoding, totalChars, hash, endsWithNewline, err := loadFileLines(filePath, "")
 	if err != nil {
 		return
 	}
 
 	b := NewBuffer()
 	b.filePath = filePath
+	b.lines = lines
 	b.encoding = encoding
 
 	// 💡 파일 감지기에 등록
 	e.fileWatcher.Add(filePath)
 
-	b.setLinesFromText(strData)
-	b.savedTotalChars = b.totalChars // 💡 글자 수 완벽 동기화 (누락 방지)
+	b.vCache = make(map[int][]VisualLine)
+	b.vLinesValid = false
+	b.totalChars = totalChars
+	b.savedTotalChars = totalChars
+	b.currentHash = hash
+	b.savedHash = hash
+	b.endsWithNewline = endsWithNewline
+	b.savedStrongHash = b.computeStrongHash()
+	b.updateSavedFileInfo()
 	e.buffers = append(e.buffers, b)
 	e.activeBuffer = len(e.buffers) - 1
+	debug.FreeOSMemory() // 💡 파일 열기 후 즉각 메모리 반환
 }
 
 func (e *Editor) saveActiveFile(s tcell.Screen) {
@@ -2786,8 +2980,7 @@ func (e *Editor) saveActiveFile(s tcell.Screen) {
 		return
 	}
 
-	content := b.getContent()
-	err := saveFileWithEncoding(b.filePath, content, b.encoding)
+	err := b.saveToFile(b.filePath)
 	if err != nil {
 		e.promptMode = true
 		e.promptType = "alert"
@@ -2798,6 +2991,7 @@ func (e *Editor) saveActiveFile(s tcell.Screen) {
 	b.markSaved()
 
 	if b.isConfig {
+		content := b.getContent()
 		var newCfg Config
 		if err := json.Unmarshal([]byte(content), &newCfg); err == nil {
 			e.cfg = newCfg
@@ -2818,18 +3012,17 @@ func (e *Editor) saveAsFile(s tcell.Screen) {
 		return
 	}
 
-	// 💡 이전 파일 경로를 백업해둡니다
-	oldPath := b.filePath
-	b.filePath = filePath
-
-	content := b.getContent()
-	err = saveFileWithEncoding(b.filePath, content, b.encoding)
+	err = b.saveToFile(filePath)
 	if err != nil {
 		e.promptMode = true
 		e.promptType = "alert"
 		e.alertMessage = fmt.Sprintf("저장 실패: %v", err)
 		return
 	}
+
+	// 💡 저장이 디스크에 무사히 완료된 후에만 내부 상태를 갱신합니다.
+	oldPath := b.filePath
+	b.filePath = filePath
 
 	b.markSaved()
 
@@ -2840,6 +3033,7 @@ func (e *Editor) saveAsFile(s tcell.Screen) {
 	e.fileWatcher.Add(filePath)
 
 	if b.isConfig {
+		content := b.getContent()
 		var newCfg Config
 		if err := json.Unmarshal([]byte(content), &newCfg); err == nil {
 			e.cfg = newCfg
@@ -2866,7 +3060,7 @@ func (e *Editor) toggleConfigBuffer() {
 	if path == "" {
 		return
 	}
-	strData, _, err := readFileDetectEncoding(path)
+	lines, encoding, totalChars, hash, endsWithNewline, err := loadFileLines(path, "")
 	if err != nil {
 		return
 	}
@@ -2878,10 +3072,20 @@ func (e *Editor) toggleConfigBuffer() {
 	// 💡 config.json 파일도 감지기에 등록
 	e.fileWatcher.Add(path)
 
-	configBuf.setLinesFromText(strData)
-	configBuf.savedTotalChars = configBuf.totalChars // 💡 추가됨
+	configBuf.lines = lines
+	configBuf.encoding = encoding
+	configBuf.vCache = make(map[int][]VisualLine)
+	configBuf.vLinesValid = false
+	configBuf.totalChars = totalChars
+	configBuf.savedTotalChars = totalChars
+	configBuf.currentHash = hash
+	configBuf.savedHash = hash
+	configBuf.endsWithNewline = endsWithNewline
+	configBuf.savedStrongHash = configBuf.computeStrongHash()
+	configBuf.updateSavedFileInfo()
 	e.buffers = append(e.buffers, configBuf)
 	e.activeBuffer = len(e.buffers) - 1
+	debug.FreeOSMemory() // 💡 설정 열기 후 즉시 메모리 반환
 }
 
 // --- [ 5. 검색 및 치환 로직 ] ---
@@ -2968,6 +3172,10 @@ func (b *Buffer) findAllMatches(overlap bool) {
 		compiled, err := regexp.Compile(pattern)
 		if err == nil {
 			re = compiled
+		} else {
+			b.matches = nil
+			b.clearSelection()
+			return
 		}
 	}
 
@@ -2979,17 +3187,23 @@ func (b *Buffer) findAllMatches(overlap bool) {
 	}
 
 	// 💡 1줄 안에서 매치를 찾는 공통 로직 (클로저)
-	findInLine := func(lineIdx int) []MatchInfo {
+	findInLine := func(lineIdx int, limit int) []MatchInfo {
+		if limit <= 0 {
+			return nil
+		}
 		var lineMatches []MatchInfo
 		lineData := b.lines[lineIdx]
 		if re != nil {
-			locs := re.FindAllIndex(lineData, -1)
+			locs := re.FindAllIndex(lineData, limit)
 			for _, loc := range locs {
 				lineMatches = append(lineMatches, MatchInfo{loc: Loc{lineIdx, loc[0]}, matchLen: loc[1] - loc[0]})
 			}
 		} else {
 			offset := 0
 			for offset <= len(lineData) {
+				if len(lineMatches) >= limit {
+					break
+				}
 				match := true
 				currentByteOffset := offset
 				for j := 0; j < len(searchRunes); j++ {
@@ -3034,15 +3248,19 @@ func (b *Buffer) findAllMatches(overlap bool) {
 	countAbove, countBelow := 0, 0
 
 	// 1. 현재 커서가 있는 줄 처리 (커서 앞/뒤 분리)
-	cursorMatches := findInLine(b.cursor.L)
+	cursorMatches := findInLine(b.cursor.L, 5000)
 	var cursorLineAbove []MatchInfo
 	for _, m := range cursorMatches {
 		if m.loc.C < b.cursor.C {
-			cursorLineAbove = append(cursorLineAbove, m)
-			countAbove++
+			if countAbove < 5000 {
+				cursorLineAbove = append(cursorLineAbove, m)
+				countAbove++
+			}
 		} else {
-			matchesBelow = append(matchesBelow, m)
-			countBelow++
+			if countBelow < 5000 {
+				matchesBelow = append(matchesBelow, m)
+				countBelow++
+			}
 		}
 	}
 	if len(cursorLineAbove) > 0 {
@@ -3055,7 +3273,7 @@ func (b *Buffer) findAllMatches(overlap bool) {
 			b.searchCapped = true
 			break
 		}
-		lm := findInLine(i)
+		lm := findInLine(i, 5000-countBelow)
 		if len(lm) > 0 {
 			matchesBelow = append(matchesBelow, lm...)
 			countBelow += len(lm)
@@ -3068,7 +3286,7 @@ func (b *Buffer) findAllMatches(overlap bool) {
 			b.searchCapped = true
 			break
 		}
-		lm := findInLine(i)
+		lm := findInLine(i, 5000-countAbove)
 		if len(lm) > 0 {
 			matchesAbove = append(matchesAbove, lm)
 			countAbove += len(lm)
@@ -3150,6 +3368,7 @@ var ActionMap = map[tcell.Key]EditorAction{
 				return
 			}
 		}
+		shuttingDown.Store(true)
 		s.Fini()
 		os.Exit(0)
 	},
@@ -3212,6 +3431,7 @@ var ActionMap = map[tcell.Key]EditorAction{
 			return
 		}
 		if len(e.buffers) <= 1 {
+			shuttingDown.Store(true)
 			s.Fini()
 			os.Exit(0)
 		}
@@ -3311,12 +3531,21 @@ func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
 	b := NewBuffer()
 	b.filePath = absPath
 	b.isReadOnly = isReadOnly
-	strData, encoding, err := readFileDetectEncoding(absPath)
+	lines, encoding, totalChars, hash, endsWithNewline, err := loadFileLines(absPath, "")
 	if err == nil {
+		b.lines = lines
 		b.encoding = encoding
 		e.fileWatcher.Add(absPath)
-		b.setLinesFromText(strData)
-		b.savedTotalChars = b.totalChars
+		b.vCache = make(map[int][]VisualLine)
+		b.vLinesValid = false
+		b.totalChars = totalChars
+		b.savedTotalChars = totalChars
+		b.currentHash = hash
+		b.savedHash = hash
+		b.endsWithNewline = endsWithNewline
+		b.savedStrongHash = b.computeStrongHash()
+		b.updateSavedFileInfo()
+		debug.FreeOSMemory() // 💡 로딩 후 즉시 메모리 반환
 	}
 
 	if !e.initialBufferUsed && len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified && !e.buffers[0].isConfig {
@@ -3341,7 +3570,7 @@ func (e *Editor) focusOrOpenConfig(isReadOnly bool) {
 	if path == "" {
 		return
 	}
-	strData, _, err := readFileDetectEncoding(path)
+	lines, encoding, totalChars, hash, endsWithNewline, err := loadFileLines(path, "")
 	if err != nil {
 		return
 	}
@@ -3351,8 +3580,18 @@ func (e *Editor) focusOrOpenConfig(isReadOnly bool) {
 	b.isConfig = true
 	b.isReadOnly = isReadOnly
 	e.fileWatcher.Add(path)
-	b.setLinesFromText(strData)
-	b.savedTotalChars = b.totalChars
+	b.lines = lines
+	b.encoding = encoding
+	b.vCache = make(map[int][]VisualLine)
+	b.vLinesValid = false
+	b.totalChars = totalChars
+	b.savedTotalChars = totalChars
+	b.currentHash = hash
+	b.savedHash = hash
+	b.endsWithNewline = endsWithNewline
+	b.savedStrongHash = b.computeStrongHash()
+	b.updateSavedFileInfo()
+	debug.FreeOSMemory() // 💡 설정 로딩 후 즉시 메모리 반환
 
 	if !e.initialBufferUsed && len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified && !e.buffers[0].isConfig {
 		e.buffers[0] = b
@@ -3371,8 +3610,6 @@ func (e *Editor) getActive() *Buffer {
 }
 
 func main() {
-	_ = os.Setenv("LANG", "ko_KR.UTF-8")
-	_ = os.Setenv("LC_ALL", "ko_KR.UTF-8")
 
 	// 💡 CLI 스테이트 머신 파서
 	var actions []StartupAction
@@ -3391,7 +3628,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.1.3 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.2.0 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -3522,48 +3759,66 @@ func main() {
 		case *tcell.EventInterrupt:
 			filePath, ok := ev.Data().(string)
 			if ok {
-				for i, buf := range editor.buffers {
-					if buf.filePath == filePath {
-						// 💡 수정된 부분: 파일 감지기도 현재 탭의 인코딩을 존중합니다.
-						var strData string
-						var err error
-						if buf.encoding != "" && buf.encoding != "UTF-8" {
-							strData, err = readFileWithEncoding(filePath, buf.encoding)
-						} else {
-							strData, _, err = readFileDetectEncoding(filePath)
+				// 💡 [안전장치 아키텍처]: 가변 슬라이스의 루프 인덱스 직접 참조를 폐기하고 안전하게 스냅샷 참조
+				var targetBufs []*Buffer
+				for _, buf := range editor.buffers {
+					if buf != nil && buf.filePath == filePath {
+						targetBufs = append(targetBufs, buf)
+					}
+				}
+
+				for _, buf := range targetBufs {
+					// 현재 활성화된 에디터 버퍼 슬라이스 내에 여전히 존재하는지 재차 교차 검증
+					exists := false
+					targetIdx := -1
+					for idx, currentBuf := range editor.buffers {
+						if currentBuf == buf {
+							exists = true
+							targetIdx = idx
+							break
 						}
+					}
+					if !exists || targetIdx == -1 {
+						continue
+					}
 
-						if err == nil {
-							incomingLines := bytes.Split([]byte(strData), []byte("\n"))
-							for i := range incomingLines {
-								if len(incomingLines[i]) > 0 && incomingLines[i][len(incomingLines[i])-1] == '\r' {
-									incomingLines[i] = incomingLines[i][:len(incomingLines[i])-1]
-								}
-							}
-							var incomingHash uint64 = fnvHash([]byte{})
-							for _, l := range incomingLines {
-								incomingHash ^= fnvHash(l)
-							}
-							incomingChars := utf8.RuneCountInString(strData)
+					// 💡 우리가 방금 쓴 변경(저장)이면 디스크 재읽기 자체를 건너뜀
+					if info, err := os.Stat(filePath); err == nil {
+						if info.ModTime().Equal(buf.savedModTime) && info.Size() == buf.savedSize {
+							continue
+						}
+					}
 
-							if incomingHash != buf.savedHash || incomingChars != buf.savedTotalChars {
-								if buf.isModified {
-									editor.promptMode = true
-									editor.promptType = "external_change"
-									editor.targetCloseBuffer = i
-									needsLayout = true
-								} else {
-									if buf.reloadFromDisk() {
-										if buf.isConfig {
-											var newCfg Config
-											if err := json.Unmarshal([]byte(buf.getContent()), &newCfg); err == nil {
-												editor.cfg = newCfg
-											}
-										}
-										needsLayout = true
-										snapToCursor = true
+					// 💡 수정된 부분: 파일 감지기도 현재 탭의 인코딩을 존중합니다.
+					lines, encoding, incomingChars, incomingHash, incomingEndsWithNL, err := loadFileLines(filePath, buf.encoding)
+					if err == nil {
+						if incomingHash != buf.savedHash || incomingChars != buf.savedTotalChars {
+							if buf.isModified {
+								alreadyQueued := false
+								for _, q := range editor.externalChangeQueue {
+									if q == targetIdx {
+										alreadyQueued = true
+										break
 									}
 								}
+								if !alreadyQueued {
+									editor.externalChangeQueue = append(editor.externalChangeQueue, targetIdx)
+								}
+								editor.promptMode = true
+								editor.promptType = "external_change"
+								editor.targetCloseBuffer = editor.externalChangeQueue[0]
+								needsLayout = true
+							} else {
+								buf.reloadFromLines(lines, encoding, incomingChars, incomingHash, incomingEndsWithNL)
+								if buf.isConfig {
+									var newCfg Config
+									if err := json.Unmarshal([]byte(buf.getContent()), &newCfg); err == nil {
+										editor.cfg = newCfg
+									}
+								}
+								needsLayout = true
+								snapToCursor = true
+								debug.FreeOSMemory() // 💡 리로드 후 즉각 메모리 반환
 							}
 						}
 					}
@@ -3599,18 +3854,33 @@ func main() {
 			if editor.ctxMenuActive {
 				if mx >= editor.ctxMenuX && mx < editor.ctxMenuX+editor.ctxMenuW && my >= editor.ctxMenuY && my < editor.ctxMenuY+editor.ctxMenuH {
 					clickIdx := my - editor.ctxMenuY - 1
-					if clickIdx >= 0 && clickIdx < len(editor.ctxMenuItems) {
-						if editor.ctxMenuCursor != clickIdx {
-							editor.ctxMenuCursor = clickIdx
-							needsLayout = true
+					visibleItems := editor.ctxMenuH - 2
+					if clickIdx >= 0 && clickIdx < visibleItems {
+						startIdx := editor.ctxMenuCursor - visibleItems/2
+						if startIdx < 0 {
+							startIdx = 0
 						}
-						if isNewPress {
-							action := editor.ctxMenuItems[editor.ctxMenuCursor].Action
-							editor.ctxMenuActive = false
-							if action != nil {
-								action(editor, currentScreen)
+						if startIdx+visibleItems > len(editor.ctxMenuItems) {
+							startIdx = len(editor.ctxMenuItems) - visibleItems
+							if startIdx < 0 {
+								startIdx = 0
 							}
-							needsLayout = true
+						}
+						targetItemIdx := startIdx + clickIdx
+
+						if targetItemIdx >= 0 && targetItemIdx < len(editor.ctxMenuItems) {
+							if editor.ctxMenuCursor != targetItemIdx {
+								editor.ctxMenuCursor = targetItemIdx
+								needsLayout = true
+							}
+							if isNewPress {
+								action := editor.ctxMenuItems[editor.ctxMenuCursor].Action
+								editor.ctxMenuActive = false
+								if action != nil {
+									action(editor, currentScreen)
+								}
+								needsLayout = true
+							}
 						}
 					}
 				} else if isNewPress {
@@ -3623,19 +3893,34 @@ func main() {
 			if editor.encodeMenuActive {
 				if mx >= editor.encodeMenuX && mx < editor.encodeMenuX+editor.encodeMenuW && my >= editor.encodeMenuY && my < editor.encodeMenuY+editor.encodeMenuH {
 					clickIdx := my - editor.encodeMenuY - 1
-					if clickIdx >= 0 && clickIdx < len(editor.encodeMenuItems) {
-						if editor.encodeMenuCursor != clickIdx {
-							editor.encodeMenuCursor = clickIdx
-							needsLayout = true
+					visibleItems := editor.encodeMenuH - 2
+					if clickIdx >= 0 && clickIdx < visibleItems {
+						startIdx := editor.encodeMenuCursor - visibleItems/2
+						if startIdx < 0 {
+							startIdx = 0
 						}
-						if isNewPress {
-							action := editor.encodeMenuItems[editor.encodeMenuCursor].Action
-							editor.encodeMenuActive = false
-							editor.encodeMenuState = 0 // 💡 상태 초기화 필수!
-							if action != nil {
-								action(editor, currentScreen)
+						if startIdx+visibleItems > len(editor.encodeMenuItems) {
+							startIdx = len(editor.encodeMenuItems) - visibleItems
+							if startIdx < 0 {
+								startIdx = 0
 							}
-							needsLayout = true
+						}
+						targetItemIdx := startIdx + clickIdx
+
+						if targetItemIdx >= 0 && targetItemIdx < len(editor.encodeMenuItems) {
+							if editor.encodeMenuCursor != targetItemIdx {
+								editor.encodeMenuCursor = targetItemIdx
+								needsLayout = true
+							}
+							if isNewPress {
+								action := editor.encodeMenuItems[editor.encodeMenuCursor].Action
+								editor.encodeMenuActive = false
+								editor.encodeMenuState = 0 // 💡 상태 초기화 필수!
+								if action != nil {
+									action(editor, currentScreen)
+								}
+								needsLayout = true
+							}
 						}
 					}
 				} else if isNewPress {
@@ -3945,13 +4230,17 @@ func main() {
 						b.cursor = loc
 					}
 					// 🟢 O(1) 가상라인 역방향 이동
-					if my < editor.tabHeight && b.vOffsetL > 0 {
+					if my < editor.tabHeight && (b.vOffsetL > 0 || b.vOffsetSub > 0) {
 						b.vOffsetSub--
 						if b.vOffsetSub < 0 {
 							b.vOffsetL--
 							b.ensureVCache(b.vOffsetL, editor.cfg)
 							b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
 						}
+						// 💡 [추가] 스크롤되어 새로 나타난 맨 윗줄 좌표를 즉시 다시 계산해서 주입!
+						loc = b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
+						b.selection.End = loc
+						b.cursor = loc
 						// 🟢 O(1) 가상라인 순방향 이동
 					} else if my >= h-1 {
 						b.vOffsetSub++
@@ -3964,6 +4253,10 @@ func main() {
 								b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
 							}
 						}
+						// 💡 [추가] 아래쪽도 스크롤 직후 새 줄 좌표를 즉시 동기화!
+						loc = b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
+						b.selection.End = loc
+						b.cursor = loc
 					}
 				}
 				snapToCursor = true
@@ -4011,15 +4304,32 @@ func main() {
 
 				if ev.Key() == tcell.KeyEscape || ev.Rune() == 'n' || ev.Rune() == 'N' {
 					editor.promptMode = false
+					if editor.promptType == "external_change" && len(editor.externalChangeQueue) > 0 {
+						editor.externalChangeQueue = editor.externalChangeQueue[1:]
+						if len(editor.externalChangeQueue) > 0 {
+							editor.promptMode = true
+							editor.targetCloseBuffer = editor.externalChangeQueue[0]
+						}
+					}
 					needsLayout = true
 				} else if ev.Rune() == 'y' || ev.Rune() == 'Y' {
 					editor.promptMode = false
 
-					// 💡 타겟 탭이 여전히 유효한지 검사하는 안전장치 추가!
+					// 💡 큐를 진행하기 전에 현재 타겟 탭을 캡처합니다.
 					target := editor.targetCloseBuffer
 					isValidTarget := target >= 0 && target < len(editor.buffers)
 
+					// advance queue
+					if editor.promptType == "external_change" && len(editor.externalChangeQueue) > 0 {
+						editor.externalChangeQueue = editor.externalChangeQueue[1:]
+						if len(editor.externalChangeQueue) > 0 {
+							editor.promptMode = true
+							editor.targetCloseBuffer = editor.externalChangeQueue[0] // next prompt
+						}
+					}
+
 					if editor.promptType == "quit" {
+						shuttingDown.Store(true)
 						currentScreen.Fini()
 						os.Exit(0)
 					} else if editor.promptType == "close" {
@@ -4027,6 +4337,7 @@ func main() {
 							continue
 						}
 						if len(editor.buffers) <= 1 {
+							shuttingDown.Store(true)
 							currentScreen.Fini()
 							os.Exit(0)
 						}
@@ -4639,10 +4950,10 @@ func main() {
 					}
 				}
 
-				b.cursor = oldCursor
+				b.cursor = b.alignToRuneBoundary(oldCursor)
 				if hasSel {
-					b.selection.Start = s
-					b.selection.End = e
+					b.selection.Start = b.alignToRuneBoundary(s)
+					b.selection.End = b.alignToRuneBoundary(e)
 				}
 				b.EndTransaction()
 				needsLayout = true
@@ -4737,11 +5048,35 @@ func main() {
 							b.moveWordLeft()
 							startX = b.cursor.C
 							b.cursor = oldCursor
+							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
+						} else if editor.cfg.SmartBackspace {
+							// 💡 스마트 백스페이스 로직 추가
+							line := b.lines[b.cursor.L]
+							isAllSpaces := true
+							for i := 0; i < b.cursor.C; i++ {
+								if line[i] != ' ' {
+									isAllSpaces = false
+									break
+								}
+							}
+							// 커서 앞이 전부 공백이라면 탭 크기 단위로 정렬하여 삭제
+							if isAllSpaces {
+								rem := b.cursor.C % editor.cfg.TabSize
+								if rem == 0 {
+									rem = editor.cfg.TabSize
+								}
+								startX -= rem
+							} else {
+								_, size := utf8.DecodeLastRune(line[:b.cursor.C])
+								startX -= size
+							}
+							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, b.cursor)
 						} else {
+							// 기본 백스페이스 (글자 1개 삭제)
 							_, size := utf8.DecodeLastRune(b.lines[b.cursor.L][:b.cursor.C])
 							startX -= size
+							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
 						}
-						b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
 					} else if b.cursor.L > 0 {
 						b.DeleteTextWithRecord(Loc{b.cursor.L - 1, len(b.lines[b.cursor.L-1])}, b.cursor)
 					}
