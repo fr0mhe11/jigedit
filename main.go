@@ -3386,7 +3386,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.1.1 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.1.2 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -4466,12 +4466,19 @@ func main() {
 								lineNum = len(b.lines) - 1
 							}
 							b.cursor.L = lineNum
-							b.cursor.C = colNum - 1
-							if b.cursor.C < 0 {
+							targetRuneIdx := colNum - 1
+							if targetRuneIdx <= 0 {
 								b.cursor.C = 0
-							}
-							if b.cursor.C > len(b.lines[b.cursor.L]) {
-								b.cursor.C = len(b.lines[b.cursor.L])
+							} else {
+								byteOffset := 0
+								lineData := b.lines[b.cursor.L]
+								runeCount := 0
+								for byteOffset < len(lineData) && runeCount < targetRuneIdx {
+									_, size := utf8.DecodeRune(lineData[byteOffset:])
+									byteOffset += size
+									runeCount++
+								}
+								b.cursor.C = byteOffset
 							}
 						}
 						b.gotoMode = false
