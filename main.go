@@ -2665,9 +2665,9 @@ func (e *Editor) draw(s tcell.Screen) {
 			if selStart.L == selEnd.L {
 				selChars = utf8.RuneCount(b.lines[selStart.L][selStart.C:selEnd.C])
 			} else {
-				selChars += utf8.RuneCount(b.lines[selStart.L][selStart.C:]) + 1
+				selChars += utf8.RuneCount(b.lines[selStart.L][selStart.C:])
 				for idx := selStart.L + 1; idx < selEnd.L; idx++ {
-					selChars += utf8.RuneCount(b.lines[idx]) + 1
+					selChars += utf8.RuneCount(b.lines[idx])
 				}
 				selChars += utf8.RuneCount(b.lines[selEnd.L][:selEnd.C])
 			}
@@ -3628,7 +3628,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.2.0 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.2.1 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
