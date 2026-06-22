@@ -1184,10 +1184,10 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 		return loc
 	}
 
-	// 💡 [해시 증분] 조작 전 원본 행의 해시를 전체 합에서 제거
+// 💡 [해시 증분] 조작 전 원본 행의 해시를 전체 합에서 제거
 	b.currentHash ^= fnvHash(b.lines[loc.L])
 
-	b.totalChars += utf8.RuneCount(textBytes)
+	b.totalChars += utf8.RuneCount(textBytes) - bytes.Count(textBytes, []byte{'\n'})
 
 	var newLines [][]byte
 	start := 0
@@ -1319,7 +1319,7 @@ func (b *Buffer) Remove(start, end Loc) string {
 	}
 
 	deletedStr := string(deletedBytes)
-	b.totalChars -= utf8.RuneCountInString(deletedStr)
+	b.totalChars -= utf8.RuneCountInString(deletedStr) - (end.L - start.L)
 	return deletedStr
 }
 
