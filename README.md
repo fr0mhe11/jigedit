@@ -32,6 +32,8 @@ heres a picture of jigedit editing it's own code
 
 ## Installation
 
+also install `wl-clipboard` if you are on wayland for better clipboard features   
+
 ### Install jigedit on linux **(recommended)** :
 
 ```bash
