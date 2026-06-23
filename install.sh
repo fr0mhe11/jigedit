@@ -74,4 +74,4 @@ chmod +x /tmp/jigedit
 sudo mv /tmp/jigedit /usr/local/bin/jigedit
 
 echo ""
-echo "🎉 jigedit installed successfully! Try running 'jigedit -h'"
+echo "jigedit installed successfully! Try running 'jigedit -h'"
