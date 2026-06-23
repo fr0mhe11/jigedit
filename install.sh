@@ -24,7 +24,9 @@ echo "1) wl-clipboard (Wayland 환경 추천)"
 echo "2) xclip (X11 환경 추천)"
 echo "3) 둘 다 설치 (호환성 목적)"
 echo "4) 설치 안 함 (이미 설치되어 있거나 수동 설치)"
-read -p "번호를 선택하세요 [1-4] (엔터를 누르면 추천값 $DEFAULT_CHOICE 선택): " USER_CHOICE
+
+# 💡 수정됨: curl | bash 로 실행해도 키보드 입력을 정상적으로 대기하도록 </dev/tty 추가
+read -p "번호를 선택하세요 [1-4] (엔터를 누르면 추천값 $DEFAULT_CHOICE 선택): " USER_CHOICE </dev/tty
 
 # 사용자가 그냥 엔터를 쳤을 경우 기본값 할당
 if [ -z "$USER_CHOICE" ]; then
