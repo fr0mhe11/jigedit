@@ -84,7 +84,6 @@ sudo dnf autoremove
 
 
 
-```
 
 ## TODO
 - [x] extensive encoding support
