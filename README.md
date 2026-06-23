@@ -57,30 +57,33 @@ sudo rm /usr/local/bin/jigedit
 rm -rf ~/.config/jigedit
 ```
 
-## ⚠️ Dependencies
 
+⚠️ Dependencies
 
-this program uses `zenity` and `xclip`, thus these two will be installed on your computer when installing jigedit.
+This program uses `zenity` (for file dialogs), and either `wl-clipboard` (for Wayland) or `xclip` (for X11) for clipboard support. Depending on your environment, these will be installed on your computer when installing jigedit.
 
-to remove those dependencies after uninstalling this program, run: 
+To remove those dependencies after uninstalling this program, run the following commands:
 
-
-⚠️ ⚠️ ⚠️  **warning!** remove these two at your own risk! 
+⚠️ ⚠️ ⚠️ Warning! Remove these at your own risk! (Other programs on your system might be using them)
 
 **Ubuntu / Debian:**
 ```bash
-sudo apt-get remove --autoremove zenity xclip
+sudo apt-get remove --autoremove zenity xclip wl-clipboard
 ```
 
 **Arch Linux:**
-```bash.
-sudo pacman -Rns zenity xclip
+```bash
+sudo pacman -Rns zenity xclip wl-clipboard
 ```
 
 **Fedora / RHEL:**
 ```bash
-sudo dnf remove zenity xclip
+sudo dnf remove zenity xclip wl-clipboard
 sudo dnf autoremove
+```
+
+
+
 ```
 
 ## TODO
