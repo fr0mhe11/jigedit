@@ -2337,13 +2337,13 @@ func (e *Editor) draw(s tcell.Screen) {
 					selected = true
 				}
 				if lineIdx == selStart.L && lineIdx == selEnd.L {
-					selected = i >= selStart.C && i <= selEnd.C
+					selected = i >= selStart.C && i < selEnd.C
 				}
 				if lineIdx == selStart.L && lineIdx < selEnd.L {
 					selected = i >= selStart.C
 				}
 				if lineIdx == selEnd.L && lineIdx > selStart.L {
-					selected = i <= selEnd.C
+					selected = i < selEnd.C
 				}
 				if selected {
 					if currentX >= b.hOffset && currentX < b.hOffset+textMaxWidth {
