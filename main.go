@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,7 +26,6 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/ncruces/zenity"
 
-	"github.com/saintfish/chardet"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/japanese"
@@ -81,11 +79,11 @@ func LoadConfig() Config {
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		_ = os.MkdirAll(configDir, 0755)
 		defaultCfg := DefaultConfig()
-			data, _ := json.MarshalIndent(defaultCfg, "", "    ")
-			_ = ioutil.WriteFile(configPath, data, 0644)
-			return defaultCfg
+		data, _ := json.MarshalIndent(defaultCfg, "", "    ")
+		_ = os.WriteFile(configPath, data, 0644)
+		return defaultCfg
 	}
-	data, err := ioutil.ReadFile(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return DefaultConfig()
 	}
@@ -174,96 +172,95 @@ func fastRuneWidth(r rune, tabSize int) int {
 // 💡 이름으로 인코딩 객체를 매핑해주는 범용 엔진
 func getTextEncoding(name string) encoding.Encoding {
 	switch name {
-		// Korean
-		case "CP949 (EUC-KR)", "CP949", "EUC-KR":
-			return korean.EUCKR
+	// Korean
+	case "CP949 (EUC-KR)", "CP949", "EUC-KR":
+		return korean.EUCKR
 
-			// Unicode
-		case "UTF-16 LE":
-			return xunicode.UTF16(xunicode.LittleEndian, xunicode.UseBOM)
-		case "UTF-16 BE":
-			return xunicode.UTF16(xunicode.BigEndian, xunicode.UseBOM)
+		// Unicode
+	case "UTF-16 LE":
+		return xunicode.UTF16(xunicode.LittleEndian, xunicode.UseBOM)
+	case "UTF-16 BE":
+		return xunicode.UTF16(xunicode.BigEndian, xunicode.UseBOM)
 
-			// Japanese
-		case "Shift-JIS":
-			return japanese.ShiftJIS
-		case "EUC-JP":
-			return japanese.EUCJP
-		case "ISO-2022-JP":
-			return japanese.ISO2022JP
+		// Japanese
+	case "Shift-JIS":
+		return japanese.ShiftJIS
+	case "EUC-JP":
+		return japanese.EUCJP
+	case "ISO-2022-JP":
+		return japanese.ISO2022JP
 
-			// Chinese
-		case "GBK":
-			return simplifiedchinese.GBK
-		case "GB18030":
-			return simplifiedchinese.GB18030
-		case "HZ-GB2312":
-			return simplifiedchinese.HZGB2312
-		case "Big5":
-			return traditionalchinese.Big5
+		// Chinese
+	case "GBK":
+		return simplifiedchinese.GBK
+	case "GB18030":
+		return simplifiedchinese.GB18030
+	case "HZ-GB2312":
+		return simplifiedchinese.HZGB2312
+	case "Big5":
+		return traditionalchinese.Big5
 
-			// Western / Central European
-		case "ISO-8859-1":
-			return charmap.ISO8859_1
-		case "ISO-8859-15":
-			return charmap.ISO8859_15
-		case "CP1252":
-			return charmap.Windows1252
-		case "ISO-8859-2":
-			return charmap.ISO8859_2
-		case "CP1250":
-			return charmap.Windows1250
+		// Western / Central European
+	case "ISO-8859-1":
+		return charmap.ISO8859_1
+	case "ISO-8859-15":
+		return charmap.ISO8859_15
+	case "CP1252":
+		return charmap.Windows1252
+	case "ISO-8859-2":
+		return charmap.ISO8859_2
+	case "CP1250":
+		return charmap.Windows1250
 
-			// Cyrillic (Russian)
-		case "KOI8-R":
-			return charmap.KOI8R
-		case "KOI8-U":
-			return charmap.KOI8U
-		case "CP1251":
-			return charmap.Windows1251
-		case "ISO-8859-5":
-			return charmap.ISO8859_5
+		// Cyrillic (Russian)
+	case "KOI8-R":
+		return charmap.KOI8R
+	case "KOI8-U":
+		return charmap.KOI8U
+	case "CP1251":
+		return charmap.Windows1251
+	case "ISO-8859-5":
+		return charmap.ISO8859_5
 
-			// Greek & Turkish
-		case "ISO-8859-7":
-			return charmap.ISO8859_7
-		case "CP1253":
-			return charmap.Windows1253
-		case "ISO-8859-9":
-			return charmap.ISO8859_9
-		case "CP1254":
-			return charmap.Windows1254
+		// Greek & Turkish
+	case "ISO-8859-7":
+		return charmap.ISO8859_7
+	case "CP1253":
+		return charmap.Windows1253
+	case "ISO-8859-9":
+		return charmap.ISO8859_9
+	case "CP1254":
+		return charmap.Windows1254
 
-			// Hebrew & Arabic
-		case "ISO-8859-8":
-			return charmap.ISO8859_8
-		case "CP1255":
-			return charmap.Windows1255
-		case "ISO-8859-6":
-			return charmap.ISO8859_6
-		case "CP1256":
-			return charmap.Windows1256
+		// Hebrew & Arabic
+	case "ISO-8859-8":
+		return charmap.ISO8859_8
+	case "CP1255":
+		return charmap.Windows1255
+	case "ISO-8859-6":
+		return charmap.ISO8859_6
+	case "CP1256":
+		return charmap.Windows1256
 
-			// Thai, Baltic, Nordic
-		case "CP874":
-			return charmap.Windows874
-		case "CP1258":
-			return charmap.Windows1258
-		case "ISO-8859-4":
-			return charmap.ISO8859_4
-		case "ISO-8859-13":
-			return charmap.ISO8859_13
-		case "CP1257":
-			return charmap.Windows1257
-		case "ISO-8859-10":
-			return charmap.ISO8859_10
+		// Thai, Baltic, Nordic
+	case "CP874":
+		return charmap.Windows874
+	case "CP1258":
+		return charmap.Windows1258
+	case "ISO-8859-4":
+		return charmap.ISO8859_4
+	case "ISO-8859-13":
+		return charmap.ISO8859_13
+	case "CP1257":
+		return charmap.Windows1257
+	case "ISO-8859-10":
+		return charmap.ISO8859_10
 
-		default:
-			return nil // UTF-8
+	default:
+		return nil // UTF-8
 	}
 }
 
-// 💡 KWrite(Uchardet) 수준의 통계학 기반 언어 감지 엔진
 // 💡 KWrite(Uchardet) 수준의 통계학 기반 언어 감지 엔진 (모든 인코딩 완벽 매핑)
 
 // --- [ 2. 자료구조 정의 ] ---
@@ -345,11 +342,12 @@ type Buffer struct {
 	matchIdx     int
 	searchCapped bool
 
-	undoStack   []Transaction
-	redoStack   []Transaction
-	currentTx   *Transaction
-	txIDCounter int64
-	savedTxID   int64
+	undoStack      []Transaction
+	redoStack      []Transaction
+	totalUndoBytes int
+	currentTx      *Transaction
+	txIDCounter    int64
+	savedTxID      int64
 
 	gotoMode       bool
 	gotoInput      []rune
@@ -481,13 +479,6 @@ type Editor struct {
 	initialBufferUsed bool
 }
 
-type cellState struct {
-	mainc rune
-	comb  []rune
-	style tcell.Style
-}
-
-
 // 💡 메뉴 아이템 이름의 첫 글자가 입력한 알파벳과 일치하는 인덱스를 탐색하는 헬퍼 함수
 func getMenuJumpIdx(items []PaletteItem, r rune, currentIdx int) int {
 	target := unicode.ToLower(r)
@@ -520,8 +511,6 @@ func getMenuJumpIdx(items []PaletteItem, r rune, currentIdx int) int {
 
 	return -1
 }
-
-
 
 func NewEditor() *Editor {
 	watcher, err := fsnotify.NewWatcher()
@@ -560,35 +549,35 @@ func (e *Editor) listenFileChanges() {
 	}()
 	for {
 		select {
-			case event, ok := <-e.fileWatcher.Events:
-				if !ok {
-					return
+		case event, ok := <-e.fileWatcher.Events:
+			if !ok {
+				return
+			}
+			if event.Op&fsnotify.Write == fsnotify.Write {
+				name := event.Name
+				mu.Lock()
+				if t, exists := timers[name]; exists {
+					t.Reset(300 * time.Millisecond)
+				} else {
+					timers[name] = time.AfterFunc(300*time.Millisecond, func() {
+						if shuttingDown.Load() {
+							return
+						}
+						if globalScreenHandle != nil && *globalScreenHandle != nil {
+							(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt(name))
+						}
+						mu.Lock()
+						delete(timers, name)
+						mu.Unlock()
+					})
 				}
-				if event.Op&fsnotify.Write == fsnotify.Write {
-					name := event.Name
-					mu.Lock()
-					if t, exists := timers[name]; exists {
-						t.Reset(300 * time.Millisecond)
-					} else {
-						timers[name] = time.AfterFunc(300*time.Millisecond, func() {
-							if shuttingDown.Load() {
-								return
-							}
-							if globalScreenHandle != nil && *globalScreenHandle != nil {
-								(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt(name))
-							}
-							mu.Lock()
-							delete(timers, name)
-							mu.Unlock()
-						})
-					}
-					mu.Unlock()
-				}
-			case err, ok := <-e.fileWatcher.Errors:
-				if !ok {
-					return
-				}
-				log.Println("watcher error:", err)
+				mu.Unlock()
+			}
+		case err, ok := <-e.fileWatcher.Errors:
+			if !ok {
+				return
+			}
+			log.Println("watcher error:", err)
 		}
 	}
 }
@@ -860,56 +849,9 @@ func (b *Buffer) markSaved() {
 	b.updateSavedFileInfo()
 }
 
-// 💡 chardet 결과를 우리 에디터 이름으로 변환해주는 헬퍼 함수
-func mapChardetToOurs(charset string) string {
-	charset = strings.ToUpper(charset)
-	switch charset {
-		case "EUC-KR", "UHC", "CP949", "ISO-2022-KR":
-			return "CP949 (EUC-KR)"
-		case "SHIFT_JIS", "SHIFT-JIS":
-			return "Shift-JIS"
-		case "GB-18030", "GB2312", "GBK":
-			return "GBK"
-		case "BIG5":
-			return "Big5"
-		case "EUC-JP":
-			return "EUC-JP"
-		case "ISO-2022-JP":
-			return "ISO-2022-JP"
-		case "WINDOWS-1252", "CP1252":
-			return "CP1252"
-		case "WINDOWS-1250", "CP1250":
-			return "CP1250"
-		case "WINDOWS-1251", "CP1251":
-			return "CP1251"
-		case "WINDOWS-1253", "CP1253":
-			return "CP1253"
-		case "WINDOWS-1254", "CP1254":
-			return "CP1254"
-		case "WINDOWS-1255", "CP1255":
-			return "CP1255"
-		case "WINDOWS-1256", "CP1256":
-			return "CP1256"
-		case "WINDOWS-1257", "CP1257":
-			return "CP1257"
-		case "WINDOWS-1258", "CP1258":
-			return "CP1258"
-		case "WINDOWS-874", "CP874", "TIS-620":
-			return "CP874"
-		case "UTF-16LE":
-			return "UTF-16 LE"
-		case "UTF-16BE":
-			return "UTF-16 BE"
-	}
-	if getTextEncoding(charset) != nil {
-		return charset
-	}
-	return ""
-}
-
-// 💡 KWrite(Uchardet) + 아시아 언어 엄격 교차 검증 하이브리드 엔진
-// 💡 통계(chardet) + 실전 디코딩 검증(Validation) 하이브리드 엔진
-// 💡 상용 에디터급 종결 엔진: 8KB 샘플링 최적화 + 디코딩 실증 검증
+// ponytail: 원래 통계적 인코딩 감지(chardet)가 포함되어 무거운 하이브리드 엔진이 작동하던 자리였으나,
+// 오작동을 방지하고 코드 복잡도를 최소화하기 위해 기본값을 UTF-8로 지정하고 BOM 패턴만 판단하도록 단순화했습니다.
+// 수동으로 인코딩을 변경하여 다시 여는 기능은 그대로 유지됩니다.
 
 // 💡 대용량 파일용 스트리밍 라인 로더 (Peak 메모리 최소화)
 func loadFileLines(path string, forcedEncoding string) (lines [][]byte, encoding string, totalChars int, hash uint64, endsWithNewline bool, err error) {
@@ -948,58 +890,8 @@ func loadFileLines(path string, forcedEncoding string) (lines [][]byte, encoding
 		} else if bytes.HasPrefix(sample, []byte{0xFE, 0xFF}) {
 			detectedEnc = "UTF-16 BE"
 			_, _ = f.Seek(2, 0)
-		} else if utf8.Valid(sample) {
-			detectedEnc = "UTF-8"
 		} else {
-			hasHighBit := false
-			for _, b := range sample {
-				if b > 127 {
-					hasHighBit = true
-					break
-				}
-			}
-			detector := chardet.NewTextDetector()
-			results, err := detector.DetectAll(sample)
-			bestEncName := "UTF-8"
-			var minErrorCount = -1
-			var fallbackEncName string
-
-			if err == nil && len(results) > 0 {
-				for _, res := range results {
-					mapped := mapChardetToOurs(res.Charset)
-					if mapped == "" {
-						continue
-					}
-					isWestern := strings.HasPrefix(mapped, "ISO-8859") || strings.HasPrefix(mapped, "CP125")
-					if hasHighBit && isWestern {
-						continue
-					}
-					enc := getTextEncoding(mapped)
-					if enc == nil {
-						continue
-					}
-					sampleDecoded, decErr := ioutil.ReadAll(transform.NewReader(bytes.NewReader(sample), enc.NewDecoder()))
-					if decErr != nil {
-						continue
-					}
-					errorCount := bytes.Count(sampleDecoded, []byte("\uFFFD"))
-					if errorCount == 0 {
-						bestEncName = mapped
-						break
-					}
-					if minErrorCount == -1 || errorCount < minErrorCount {
-						minErrorCount = errorCount
-						fallbackEncName = mapped
-					}
-				}
-			}
-			if fallbackEncName != "" && minErrorCount < len(sample)/10 {
-				detectedEnc = fallbackEncName
-			} else if hasHighBit {
-				detectedEnc = "CP949 (EUC-KR)"
-			} else {
-				detectedEnc = bestEncName
-			}
+			detectedEnc = "UTF-8"
 		}
 	}
 
@@ -1067,7 +959,7 @@ func (b *Buffer) saveToFile(path string) error {
 	if b.encoding != "" && b.encoding != "UTF-8" {
 		enc := getTextEncoding(b.encoding)
 		if enc != nil {
-			validator := transform.NewWriter(ioutil.Discard, enc.NewEncoder())
+			validator := transform.NewWriter(io.Discard, enc.NewEncoder())
 			for i, line := range b.lines {
 				if _, err := validator.Write(line); err != nil {
 					return fmt.Errorf("인코딩 변환 실패 (저장 중단됨): %v", err)
@@ -1204,11 +1096,11 @@ func (b *Buffer) reopenWithEncoding(encName string) {
 	b.hOffset = 0
 	b.undoStack = nil
 	b.redoStack = nil
+	b.totalUndoBytes = 0
 	b.isSelecting = false
 	b.txIDCounter = 0
 	b.savedTxID = 0
 	b.updateSavedFileInfo()
-	debug.FreeOSMemory() // 💡 메모리 즉각 정리
 }
 
 func (b *Buffer) Insert(loc Loc, text string) Loc {
@@ -1363,6 +1255,14 @@ func (b *Buffer) Remove(start, end Loc) string {
 
 // --- [ 4. 코어 논리 엔진 (Undo/Redo, Selection, Movement, VisualLine) ] ---
 
+func txBytes(tx Transaction) int {
+	sz := 0
+	for _, a := range tx.Actions {
+		sz += len(a.Text)
+	}
+	return sz
+}
+
 // 💡 1. 절대 꼬이지 않는 초간단 Undo / Redo 시스템
 func (b *Buffer) BeginTransaction() {
 	if b.currentTx == nil {
@@ -1403,6 +1303,7 @@ func (b *Buffer) EndTransaction() {
 							b.redoStack = nil
 							b.currentTx = nil
 							b.checkModified()
+							b.totalUndoBytes += len(currAct.Text)
 							return
 						}
 					}
@@ -1419,6 +1320,7 @@ func (b *Buffer) EndTransaction() {
 						b.redoStack = nil
 						b.currentTx = nil
 						b.checkModified()
+						b.totalUndoBytes += len(currAct.Text)
 						return
 					}
 					// 2-2. Delete 키 방향 (현재 지운 범위의 시작이, 이전에 지운 범위의 시작점과 같을 때)
@@ -1430,29 +1332,23 @@ func (b *Buffer) EndTransaction() {
 						b.redoStack = nil
 						b.currentTx = nil
 						b.checkModified()
+						b.totalUndoBytes += len(currAct.Text)
 						return
 					}
 				}
 			}
 		}
 
-		SKIP_MERGE:
+	SKIP_MERGE:
 		b.undoStack = append(b.undoStack, *b.currentTx)
+		b.totalUndoBytes += txBytes(*b.currentTx)
 		b.redoStack = nil
 
 		// Limit undo memory usage (max 256MB)
 		const maxUndoBytes = 256 << 20
 		evicted := false
-		for len(b.undoStack) > 1 {
-			totalBytes := 0
-			for _, tx := range b.undoStack {
-				for _, a := range tx.Actions {
-					totalBytes += len(a.Text)
-				}
-			}
-			if totalBytes <= maxUndoBytes {
-				break
-			}
+		for len(b.undoStack) > 1 && b.totalUndoBytes > maxUndoBytes {
+			b.totalUndoBytes -= txBytes(b.undoStack[0])
 			b.undoStack = b.undoStack[1:]
 			evicted = true
 		}
@@ -1463,6 +1359,10 @@ func (b *Buffer) EndTransaction() {
 			newStack := make([]Transaction, 0, 800)
 			newStack = append(newStack, b.undoStack[len(b.undoStack)-800:]...)
 			b.undoStack = newStack
+			b.totalUndoBytes = 0
+			for _, tx := range b.undoStack {
+				b.totalUndoBytes += txBytes(tx)
+			}
 		} else if evicted {
 			newStack := make([]Transaction, len(b.undoStack))
 			copy(newStack, b.undoStack)
@@ -1513,6 +1413,7 @@ func (b *Buffer) Undo() {
 	}
 	tx := b.undoStack[len(b.undoStack)-1]
 	b.undoStack = b.undoStack[:len(b.undoStack)-1]
+	b.totalUndoBytes -= txBytes(tx)
 	for i := len(tx.Actions) - 1; i >= 0; i-- {
 		act := tx.Actions[i]
 		if act.IsInsert {
@@ -1541,6 +1442,7 @@ func (b *Buffer) Redo() {
 	}
 	b.cursor = b.clampLoc(tx.AfterLoc)
 	b.undoStack = append(b.undoStack, tx)
+	b.totalUndoBytes += txBytes(tx)
 	b.checkModified()
 	b.clearSelection()
 }
@@ -1753,11 +1655,7 @@ func (b *Buffer) getLineNumWidth(cfg Config) int {
 	return digits + 1
 }
 
-// 💡 4. 동적 Visual Line (화면 렌더링용 줄바꿈 계산) 캐시 엔진
-// 💡 4. 동적 가상 렌더링 (Dynamic Virtual Windowing) 엔진
 // 💡 4. 부분 계산(Per-Line Cache) 엔진 - 100만 줄도 0.001초 컷
-// 💡 4. 부분 계산(Per-Line Cache) 엔진
-// 🟢 [변경] 특정 물리 줄의 visual line 캐시가 비어 있으면 동적으로 계산해주는 헬퍼
 // 🟢 [변경] 특정 물리 줄의 visual line 캐시가 비어 있으면 동적으로 계산해주는 헬퍼
 func (b *Buffer) ensureVCache(i int, cfg Config) []VisualLine {
 	if b.vCache == nil {
@@ -1900,30 +1798,6 @@ func (b *Buffer) scrollToCursorV(cfg Config, screenHeight int) {
 			}
 		}
 	}
-}
-
-func (b *Buffer) getCursorVisualRange(cfg Config) (int, int) {
-	b.cursor = b.clampLoc(b.cursor)
-	line := b.lines[b.cursor.L]
-
-	cursorVisX := 0
-	for i := 0; i < b.cursor.C && i < len(line); {
-		r, size := utf8.DecodeRune(line[i:])
-		rw := fastRuneWidth(r, cfg.TabSize)
-		cursorVisX += rw
-		i += size
-	}
-
-	charWidth := 1
-	if b.cursor.C < len(line) {
-		r, _ := utf8.DecodeRune(line[b.cursor.C:])
-		charWidth = runewidth.RuneWidth(r)
-		if r == '\t' {
-			charWidth = cfg.TabSize
-		}
-	}
-
-	return cursorVisX, cursorVisX + charWidth
 }
 
 func (b *Buffer) scrollToCursorH(textMaxWidth int, cfg Config) {
@@ -2193,773 +2067,758 @@ func (e *Editor) draw(s tcell.Screen) {
 
 	// 🟢 [완벽 최적화 엔진] 전체 렌더링 vs 부분 렌더링 분기점
 	forceAllDirty := false
-		isFastPath := false
+	isFastPath := false
 
-		if e.needsFullRefresh ||
-			e.activeBuffer != e.prevActiveBuf ||
-			b.vOffsetL != e.prevVOffset || // 🟢 변경
-			b.vOffsetSub != e.prevVOffsetSub || // 🟢 추가
-			b.hOffset != e.prevHOffset ||
-			b.selection.Start != e.prevSelStart ||
-			b.selection.End != e.prevSelEnd ||
-			b.isSelecting != e.prevIsSelecting ||
-			e.paletteActive || e.prevPalette ||
-			e.ctxMenuActive || e.prevCtxMenu ||
-			e.encodeMenuActive || e.prevEncode ||
-			e.promptMode || e.prevPrompt ||
-			b.searchMode || e.prevSearch ||
-			b.gotoMode || e.prevGoto || len(b.lines) != e.prevLinesLen {
-				forceAllDirty = true
-			} else {
-				if b.totalChars == e.prevTotalChars && b.txIDCounter == e.prevTxID {
-					isFastPath = true
-				}
-			}
+	if e.needsFullRefresh ||
+		e.activeBuffer != e.prevActiveBuf ||
+		b.vOffsetL != e.prevVOffset || // 🟢 변경
+		b.vOffsetSub != e.prevVOffsetSub || // 🟢 추가
+		b.hOffset != e.prevHOffset ||
+		b.selection.Start != e.prevSelStart ||
+		b.selection.End != e.prevSelEnd ||
+		b.isSelecting != e.prevIsSelecting ||
+		e.paletteActive || e.prevPalette ||
+		e.ctxMenuActive || e.prevCtxMenu ||
+		e.encodeMenuActive || e.prevEncode ||
+		e.promptMode || e.prevPrompt ||
+		b.searchMode || e.prevSearch ||
+		b.gotoMode || e.prevGoto || len(b.lines) != e.prevLinesLen {
+		forceAllDirty = true
+	} else {
+		if b.totalChars == e.prevTotalChars && b.txIDCounter == e.prevTxID {
+			isFastPath = true
+		}
+	}
 
-			if e.needsFullRefresh {
-				s.Clear()
-				e.needsFullRefresh = false
-			}
-			setCell := func(x, y int, r rune, comb []rune, style tcell.Style) {
-				if x >= 0 && x < w && y >= 0 && y < h {
-					s.SetContent(x, y, r, comb, style)
-				}
-			}
+	if e.needsFullRefresh {
+		s.Clear()
+		e.needsFullRefresh = false
+	}
+	setCell := func(x, y int, r rune, comb []rune, style tcell.Style) {
+		if x >= 0 && x < w && y >= 0 && y < h {
+			s.SetContent(x, y, r, comb, style)
+		}
+	}
 
-			lineNumWidth := b.getLineNumWidth(e.cfg)
-			textMaxWidth := w - lineNumWidth
-			if textMaxWidth <= 0 {
-				textMaxWidth = 1
-			}
+	lineNumWidth := b.getLineNumWidth(e.cfg)
+	textMaxWidth := w - lineNumWidth
+	if textMaxWidth <= 0 {
+		textMaxWidth = 1
+	}
 
-			tabStyle := tcell.StyleDefault.Background(tcell.ColorDarkGray).Foreground(tcell.ColorWhite)
-			activeTabStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorWhite).Bold(true)
+	tabStyle := tcell.StyleDefault.Background(tcell.ColorDarkGray).Foreground(tcell.ColorWhite)
+	activeTabStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorWhite).Bold(true)
 
-			e.tabBounds = []TabBound{}
-			tabX, tabY := 0, 0
+	e.tabBounds = []TabBound{}
+	tabX, tabY := 0, 0
 
-			for i, buf := range e.buffers {
-				name := e.getTabTitle(i)
-				if buf.isModified {
-					name += " *"
-				}
-				if buf.isReadOnly {
-					name += " 🔒"
-				}
-				tabStr := " [" + name + "] "
-				tabLen := runewidth.StringWidth(tabStr)
+	for i, buf := range e.buffers {
+		name := e.getTabTitle(i)
+		if buf.isModified {
+			name += " *"
+		}
+		if buf.isReadOnly {
+			name += " 🔒"
+		}
+		tabStr := " [" + name + "] "
+		tabLen := runewidth.StringWidth(tabStr)
 
-				if tabX+tabLen > w {
-					for x := tabX; x < w; x++ {
-						setCell(x, tabY, ' ', nil, tabStyle)
-					}
-					tabX = 0
-					tabY++
-				}
-				currentStyle := tabStyle
-				if i == e.activeBuffer {
-					currentStyle = activeTabStyle
-				}
-				startX := tabX
-				for _, r := range tabStr {
-					setCell(tabX, tabY, r, nil, currentStyle)
-					tabX += runewidth.RuneWidth(r)
-				}
-				e.tabBounds = append(e.tabBounds, TabBound{Idx: i, StartX: startX, EndX: tabX, Y: tabY})
-			}
+		if tabX+tabLen > w {
 			for x := tabX; x < w; x++ {
 				setCell(x, tabY, ' ', nil, tabStyle)
 			}
-			e.tabHeight = tabY + 1
+			tabX = 0
+			tabY++
+		}
+		currentStyle := tabStyle
+		if i == e.activeBuffer {
+			currentStyle = activeTabStyle
+		}
+		startX := tabX
+		for _, r := range tabStr {
+			setCell(tabX, tabY, r, nil, currentStyle)
+			tabX += runewidth.RuneWidth(r)
+		}
+		e.tabBounds = append(e.tabBounds, TabBound{Idx: i, StartX: startX, EndX: tabX, Y: tabY})
+	}
+	for x := tabX; x < w; x++ {
+		setCell(x, tabY, ' ', nil, tabStyle)
+	}
+	e.tabHeight = tabY + 1
 
-			cursorVX, cursorVY := -1, -1
-			currentRenderY := e.tabHeight
+	cursorVX, cursorVY := -1, -1
+	currentRenderY := e.tabHeight
 
-			defaultStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorDefault)
-				lineNumStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorDarkGray)
-				statusStyle := tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack)
-				selectedStyle := tcell.StyleDefault.Background(tcell.ColorDeepSkyBlue).Foreground(tcell.ColorWhite)
-				highlightStyle := tcell.StyleDefault.Background(tcell.Color236).Foreground(tcell.ColorDefault)
-				matchHighlightStyle := tcell.StyleDefault.Background(tcell.ColorYellow).Foreground(tcell.ColorBlack)
+	defaultStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorDefault)
+	lineNumStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorDarkGray)
+	statusStyle := tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack)
+	selectedStyle := tcell.StyleDefault.Background(tcell.ColorDeepSkyBlue).Foreground(tcell.ColorWhite)
+	highlightStyle := tcell.StyleDefault.Background(tcell.Color236).Foreground(tcell.ColorDefault)
+	matchHighlightStyle := tcell.StyleDefault.Background(tcell.ColorYellow).Foreground(tcell.ColorBlack)
 
-				selStart, selEnd := b.getSelectionRange()
-				selStart = b.clampLoc(selStart) // 🟢 선택 영역 좌표 보정
-				selEnd = b.clampLoc(selEnd)     // 🟢 선택 영역 좌표 보정
-				hasSel := b.HasSelection()
+	selStart, selEnd := b.getSelectionRange()
+	selStart = b.clampLoc(selStart) // 🟢 선택 영역 좌표 보정
+	selEnd = b.clampLoc(selEnd)     // 🟢 선택 영역 좌표 보정
+	hasSel := b.HasSelection()
 
-				// 🟢 [변경] 누적합 대신, 오프셋 줄부터 한 줄씩 증가하며 화면 높이만큼만 렌더링
-				currL := b.vOffsetL
-				currSub := b.vOffsetSub
+	// 🟢 [변경] 누적합 대신, 오프셋 줄부터 한 줄씩 증가하며 화면 높이만큼만 렌더링
+	currL := b.vOffsetL
+	currSub := b.vOffsetSub
 
-				for currentRenderY < h-1 {
-					if currL >= len(b.lines) {
+	for currentRenderY < h-1 {
+		if currL >= len(b.lines) {
+			break
+		}
+		b.ensureVCache(currL, e.cfg)
+		vcls := b.vCache[currL]
+		if currSub >= len(vcls) {
+			currSub = len(vcls) - 1
+			if currSub < 0 {
+				currSub = 0
+			}
+		}
+
+		vl := vcls[currSub]
+		lineIdx := currL
+		lineData := b.lines[lineIdx]
+
+		isRowDirty := forceAllDirty
+		if !isRowDirty {
+			if isFastPath {
+				if lineIdx == b.cursor.L || lineIdx == e.prevCursor.L {
+					isRowDirty = true
+				}
+			} else {
+				if (b.dirtyStartL != -1 && lineIdx >= b.dirtyStartL) || lineIdx == b.cursor.L || lineIdx == e.prevCursor.L {
+					isRowDirty = true
+				}
+			}
+		}
+
+		if !isRowDirty {
+			currentRenderY++
+			currSub++
+			if currSub >= len(vcls) {
+				currSub = 0
+				currL++
+			}
+			continue
+		}
+
+		for x := 0; x < w; x++ {
+			setCell(x, currentRenderY, ' ', nil, tcell.StyleDefault)
+		}
+
+		var lineMatches []MatchInfo
+		if b.searchMode && len(b.searchQuery) > 0 && len(b.matches) > 0 {
+			startIdx := sort.Search(len(b.matches), func(idx int) bool {
+				return b.matches[idx].loc.L >= lineIdx
+			})
+			for idx := startIdx; idx < len(b.matches); idx++ {
+				m := b.matches[idx]
+				if m.loc.L > lineIdx {
+					break
+				}
+				lineMatches = append(lineMatches, m)
+			}
+		}
+
+		lineStyle := defaultStyle
+		if e.cfg.HighlightLine && lineIdx == b.cursor.L && !b.isSelecting {
+			lineStyle = highlightStyle
+		}
+		for x := lineNumWidth; x < w; x++ {
+			setCell(x, currentRenderY, ' ', nil, lineStyle)
+		}
+
+		if e.cfg.ShowLineNumbers {
+			if !vl.isWrapped {
+				lineNumStr := sprintfRight(lineIdx+1, lineNumWidth-1) + " "
+				for x, r := range lineNumStr {
+					setCell(x, currentRenderY, r, nil, lineNumStyle)
+				}
+			} else {
+				for x := 0; x < lineNumWidth; x++ {
+					setCell(x, currentRenderY, ' ', nil, lineNumStyle)
+				}
+			}
+		}
+
+		currentX := 0
+		if len(lineData) == 0 && lineIdx == b.cursor.L {
+			cursorVX = lineNumWidth - b.hOffset
+			cursorVY = currentRenderY
+		}
+
+		for i := vl.startCX; i < vl.endCX; {
+			r, size := utf8.DecodeRune(lineData[i:])
+			rw := fastRuneWidth(r, e.cfg.TabSize)
+
+			if lineIdx == b.cursor.L && i == b.cursor.C {
+				if !(b.stickToWrapEnd && i == vl.startCX && currSub > 0) { // 🟢 vIdx 불필요
+					cursorVX = lineNumWidth + currentX - b.hOffset
+					cursorVY = currentRenderY
+				}
+			}
+
+			charStyle := lineStyle
+			if len(lineMatches) > 0 {
+				for _, m := range lineMatches {
+					if i >= m.loc.C && i < m.loc.C+m.matchLen {
+						charStyle = matchHighlightStyle
 						break
 					}
-					b.ensureVCache(currL, e.cfg)
-					vcls := b.vCache[currL]
-					if currSub >= len(vcls) {
-						currSub = len(vcls) - 1
-						if currSub < 0 {
-							currSub = 0
-						}
-					}
-
-					vl := vcls[currSub]
-					lineIdx := currL
-					lineData := b.lines[lineIdx]
-
-					isRowDirty := forceAllDirty
-					if !isRowDirty {
-						if isFastPath {
-							if lineIdx == b.cursor.L || lineIdx == e.prevCursor.L {
-								isRowDirty = true
-							}
-						} else {
-							if (b.dirtyStartL != -1 && lineIdx >= b.dirtyStartL) || lineIdx == b.cursor.L || lineIdx == e.prevCursor.L {
-								isRowDirty = true
-							}
-						}
-					}
-
-					if !isRowDirty {
-						currentRenderY++
-						currSub++
-						if currSub >= len(vcls) {
-							currSub = 0
-							currL++
-						}
-						continue
-					}
-
-
-						for x := 0; x < w; x++ {
-							setCell(x, currentRenderY, ' ', nil, tcell.StyleDefault)
-						}
-
-
-					var lineMatches []MatchInfo
-					if b.searchMode && len(b.searchQuery) > 0 && len(b.matches) > 0 {
-						startIdx := sort.Search(len(b.matches), func(idx int) bool {
-							return b.matches[idx].loc.L >= lineIdx
-						})
-						for idx := startIdx; idx < len(b.matches); idx++ {
-							m := b.matches[idx]
-							if m.loc.L > lineIdx {
-								break
-							}
-							lineMatches = append(lineMatches, m)
-						}
-					}
-
-					lineStyle := defaultStyle
-					if e.cfg.HighlightLine && lineIdx == b.cursor.L && !b.isSelecting {
-						lineStyle = highlightStyle
-					}
-					for x := lineNumWidth; x < w; x++ {
-						setCell(x, currentRenderY, ' ', nil, lineStyle)
-					}
-
-					if e.cfg.ShowLineNumbers {
-						if !vl.isWrapped {
-							lineNumStr := sprintfRight(lineIdx+1, lineNumWidth-1) + " "
-							for x, r := range lineNumStr {
-								setCell(x, currentRenderY, r, nil, lineNumStyle)
-							}
-						} else {
-							for x := 0; x < lineNumWidth; x++ {
-								setCell(x, currentRenderY, ' ', nil, lineNumStyle)
-							}
-						}
-					}
-
-					currentX := 0
-					if len(lineData) == 0 && lineIdx == b.cursor.L {
-						cursorVX = lineNumWidth - b.hOffset
-						cursorVY = currentRenderY
-					}
-
-					for i := vl.startCX; i < vl.endCX; {
-						r, size := utf8.DecodeRune(lineData[i:])
-						rw := fastRuneWidth(r, e.cfg.TabSize)
-
-						if lineIdx == b.cursor.L && i == b.cursor.C {
-							if !(b.stickToWrapEnd && i == vl.startCX && currSub > 0) { // 🟢 vIdx 불필요
-								cursorVX = lineNumWidth + currentX - b.hOffset
-								cursorVY = currentRenderY
-							}
-						}
-
-						charStyle := lineStyle
-						if len(lineMatches) > 0 {
-							for _, m := range lineMatches {
-								if i >= m.loc.C && i < m.loc.C+m.matchLen {
-									charStyle = matchHighlightStyle
-									break
-								}
-							}
-						}
-
-						if hasSel {
-							selected := false
-							if lineIdx > selStart.L && lineIdx < selEnd.L {
-								selected = true
-							}
-							if lineIdx == selStart.L && lineIdx == selEnd.L {
-								selected = i >= selStart.C && i < selEnd.C
-							}
-							if lineIdx == selStart.L && lineIdx < selEnd.L {
-								selected = i >= selStart.C
-							}
-							if lineIdx == selEnd.L && lineIdx > selStart.L {
-								selected = i < selEnd.C
-							}
-							if selected {
-								charStyle = selectedStyle
-							}
-						}
-
-						if currentX+rw > b.hOffset && currentX < b.hOffset+textMaxWidth {
-							if r == '\t' {
-								for tx := 0; tx < rw; tx++ {
-									if currentX+tx >= b.hOffset && currentX+tx < b.hOffset+textMaxWidth {
-										setCell(lineNumWidth+currentX+tx-b.hOffset, currentRenderY, ' ', nil, charStyle)
-									}
-								}
-							} else {
-								drawX := lineNumWidth + currentX - b.hOffset
-								if drawX < lineNumWidth {
-									setCell(lineNumWidth, currentRenderY, ' ', nil, charStyle)
-								} else {
-									setCell(drawX, currentRenderY, r, nil, charStyle)
-								}
-							}
-						}
-						currentX += rw
-						i += size
-					}
-
-					if !vl.isWrapped || vl.endCX == len(lineData) {
-						if hasSel {
-							selected := false
-							i := len(lineData)
-							if lineIdx > selStart.L && lineIdx < selEnd.L {
-								selected = true
-							}
-							if lineIdx == selStart.L && lineIdx == selEnd.L {
-								selected = i >= selStart.C && i < selEnd.C
-							}
-							if lineIdx == selStart.L && lineIdx < selEnd.L {
-								selected = i >= selStart.C
-							}
-							if lineIdx == selEnd.L && lineIdx > selStart.L {
-								selected = i < selEnd.C
-							}
-							if selected {
-								if currentX >= b.hOffset && currentX < b.hOffset+textMaxWidth {
-									setCell(lineNumWidth+currentX-b.hOffset, currentRenderY, ' ', nil, selectedStyle)
-								}
-							}
-						}
-					}
-
-					if lineIdx == b.cursor.L && b.cursor.C == vl.endCX {
-						if b.cursor.C == len(lineData) || currSub+1 >= len(vcls) || b.stickToWrapEnd { // 🟢 vIdx 불필요
-							cursorVX = lineNumWidth + currentX - b.hOffset
-							cursorVY = currentRenderY
-						}
-					}
-
-					vlWidth := vl.width
-
-					showLeftIndicator := b.hOffset > 0 && vlWidth > 0
-					showRightIndicator := vlWidth > b.hOffset+textMaxWidth
-
-					if showLeftIndicator || showRightIndicator {
-						indicatorStyle := lineStyle.Foreground(tcell.ColorDarkCyan).Bold(true)
-
-						if showLeftIndicator {
-							indX := lineNumWidth - 1
-							if lineNumWidth <= 0 {
-								indX = 0
-							}
-							if indX >= 0 && indX < w {
-								mainc, _, _, _ := s.GetContent(indX, currentRenderY)
-								if runewidth.RuneWidth(mainc) == 2 {
-									setCell(indX, currentRenderY, ' ', nil, lineStyle)
-									if indX+1 < w {
-										setCell(indX+1, currentRenderY, ' ', nil, lineStyle)
-									}
-								}
-							}
-							setCell(indX, currentRenderY, '<', nil, indicatorStyle)
-						}
-
-						if showRightIndicator {
-							if w-2 >= 0 {
-								mainc, _, _, _ := s.GetContent(w-2, currentRenderY)
-								if runewidth.RuneWidth(mainc) == 2 {
-									setCell(w-2, currentRenderY, ' ', nil, lineStyle)
-								}
-							}
-							if w-1 >= 0 {
-								mainc, _, _, _ := s.GetContent(w-1, currentRenderY)
-								if runewidth.RuneWidth(mainc) == 2 {
-									setCell(w-1, currentRenderY, ' ', nil, lineStyle)
-								}
-							}
-							setCell(w-1, currentRenderY, '>', nil, indicatorStyle)
-						}
-					}
-					currentRenderY++
-					currSub++
-					if currSub >= len(vcls) {
-						currSub = 0
-						currL++
-					}
 				}
+			}
 
+			if hasSel {
+				selected := false
+				if lineIdx > selStart.L && lineIdx < selEnd.L {
+					selected = true
+				}
+				if lineIdx == selStart.L && lineIdx == selEnd.L {
+					selected = i >= selStart.C && i < selEnd.C
+				}
+				if lineIdx == selStart.L && lineIdx < selEnd.L {
+					selected = i >= selStart.C
+				}
+				if lineIdx == selEnd.L && lineIdx > selStart.L {
+					selected = i < selEnd.C
+				}
+				if selected {
+					charStyle = selectedStyle
+				}
+			}
 
-					for y := currentRenderY; y < h-1; y++ {
-						for x := 0; x < w; x++ {
-							setCell(x, y, ' ', nil, tcell.StyleDefault)
+			if currentX+rw > b.hOffset && currentX < b.hOffset+textMaxWidth {
+				if r == '\t' {
+					for tx := 0; tx < rw; tx++ {
+						if currentX+tx >= b.hOffset && currentX+tx < b.hOffset+textMaxWidth {
+							setCell(lineNumWidth+currentX+tx-b.hOffset, currentRenderY, ' ', nil, charStyle)
 						}
 					}
-
-
-				if e.promptMode {
-					var promptMsg string
-					if e.promptType == "quit" {
-						promptMsg = " [Warning] 저장되지 않은 탭이 있습니다. 무시하고 종료할까요? (y/n)"
-					} else if e.promptType == "close" {
-						promptMsg = " [Warning] 변경된 내용이 있습니다. 탭을 닫을까요? (y/n)"
-					} else if e.promptType == "reset_config" {
-						promptMsg = " [Warning] 설정을 기본값으로 초기화하시겠습니까? (y/n)"
-					} else if e.promptType == "reopen" {
-						promptMsg = " [Warning] 변경된 내용이 있습니다. 무시하고 다시 열까요? (y/n)"
-					} else if e.promptType == "close_config" {
-						promptMsg = " [Warning] 설정이 저장되지 않았습니다. 무시하고 닫을까요? (y/n)"
-					} else if e.promptType == "external_change" {
-						fileName := ""
-						if e.targetCloseBuffer >= 0 && e.targetCloseBuffer < len(e.buffers) {
-							fileName = filepath.Base(e.buffers[e.targetCloseBuffer].filePath)
-						}
-						promptMsg = fmt.Sprintf(" [Warning] '%s' 파일이 외부에서 변경되었습니다. 디스크 내용으로 덮어쓸까요? (y/n)", fileName)
-					} else if e.promptType == "alert" {
-						promptMsg = " [Alert] " + e.alertMessage + " (Enter/Esc)"
-					}
-
-					promptStyle := tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite).Bold(true)
-
-					currentX := 0
-					for _, r := range promptMsg {
-						if currentX < w {
-							setCell(currentX, h-1, r, nil, promptStyle)
-							currentX += runewidth.RuneWidth(r)
-						}
-					}
-					for currentX < w {
-						setCell(currentX, h-1, ' ', nil, promptStyle)
-						currentX++
-					}
-					cursorVX = runewidth.StringWidth(promptMsg)
-					cursorVY = h - 1
-
-				} else if b.searchMode || b.gotoMode {
-					closeBtn := " [X] "
-					b.closeBtnStartX = w - len(closeBtn)
-					b.closeBtnEndX = w - 1
-
-					checkboxArea := ""
-					if !b.gotoMode {
-						cbRegex := "[ ] .*"
-						if b.searchRegex {
-							cbRegex = "[x] .*"
-						}
-						cbCase := "[ ] Aa"
-						if b.searchCase {
-							cbCase = "[x] Aa"
-						}
-						cbWord := "[ ] \\b"
-						if b.searchWord {
-							cbWord = "[x] \\b"
-						}
-						checkboxArea = " " + cbRegex + "  " + cbCase + "  " + cbWord + " "
-					}
-					cbLen := runewidth.StringWidth(checkboxArea)
-					cbStartX := b.closeBtnStartX - cbLen
-
-					if !b.gotoMode {
-						b.chkRegexX1 = cbStartX + 1
-						b.chkRegexX2 = b.chkRegexX1 + 6
-						b.chkCaseX1 = b.chkRegexX2 + 2
-						b.chkCaseX2 = b.chkCaseX1 + 6
-						b.chkWordX1 = b.chkCaseX2 + 2
-						b.chkWordX2 = b.chkWordX1 + 6
-					}
-
-					var prefix, suffix string
-					var targetStr *[]rune
-
-					if b.gotoMode {
-						prefix = " [Go To] Line,Col: "
-						targetStr = &b.gotoInput
-						suffix = "  (Enter: 이동, Esc: 취소)"
-					} else if b.isReplace {
-						if b.replaceStep == 1 {
-							prefix = " [Replace] Find: "
-							targetStr = &b.searchQuery
-						} else if b.replaceStep == 2 {
-							prefix = " [Replace] Find: " + string(b.searchQuery) + "  ➔ Replace: "
-							targetStr = &b.replaceQuery
-						} else {
-							matchCountStr := "0/0"
-							if len(b.matches) > 0 {
-								totStr := sprintfRight(len(b.matches), 0)
-								if b.searchCapped {
-									totStr += "+"
-								}
-								matchCountStr = sprintfRight(b.matchIdx+1, 0) + "/" + totStr
-							}
-							prefix = " [Replace] Find: " + string(b.searchQuery) + "  ➔ Replace: " + string(b.replaceQuery) + "  [" + matchCountStr + "] (Enter:바꾸기, Up:이전, Down:건너뛰기, Ctrl+A:모두)"
-							targetStr = nil
-						}
-					} else {
-						matchCountStr := "0/0"
-						if len(b.matches) > 0 {
-							totStr := sprintfRight(len(b.matches), 0)
-							if b.searchCapped {
-								totStr += "+"
-							}
-							matchCountStr = sprintfRight(b.matchIdx+1, 0) + "/" + totStr
-						}
-						prefix = " [Find] Search: "
-						targetStr = &b.searchQuery
-						suffix = "  [" + matchCountStr + "] (Enter/Down:다음, Up:이전)"
-					}
-
-					currentX := 0
-					for _, r := range prefix {
-						if currentX < cbStartX {
-							setCell(currentX, h-1, r, nil, statusStyle)
-							currentX += runewidth.RuneWidth(r)
-						}
-					}
-
-					inputStartX := currentX
-					if targetStr != nil {
-						selStart, selEnd := b.inputSelStart, b.inputSelEnd
-						if selStart > selEnd {
-							selStart, selEnd = selEnd, selStart
-						}
-
-						for i, r := range *targetStr {
-							style := statusStyle
-							if b.isInputSelect && i >= selStart && i < selEnd {
-								style = selectedStyle
-							}
-							if currentX < cbStartX {
-								setCell(currentX, h-1, r, nil, style)
-								currentX += runewidth.RuneWidth(r)
-							}
-						}
-						cursorVX = inputStartX + runewidth.StringWidth(string((*targetStr)[:b.inputCX]))
-					} else {
-						cursorVX = -1
-					}
-
-					for _, r := range suffix {
-						if currentX < cbStartX {
-							setCell(currentX, h-1, r, nil, statusStyle)
-							currentX += runewidth.RuneWidth(r)
-						}
-					}
-					for currentX < cbStartX {
-						setCell(currentX, h-1, ' ', nil, statusStyle)
-						currentX++
-					}
-					cx := cbStartX
-					for _, r := range checkboxArea {
-						setCell(cx, h-1, r, nil, statusStyle)
-						cx += runewidth.RuneWidth(r)
-					}
-					cursorVY = h - 1
-
-					closeStyle := tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite).Bold(true)
-					for i, r := range closeBtn {
-						if b.closeBtnStartX+i < w {
-							setCell(b.closeBtnStartX+i, h-1, r, nil, closeStyle)
-						}
-					}
-
 				} else {
-					modeName := b.encoding
-					if b.isConfig {
-						modeName = "CONFIG.JSON"
-					}
-					charCountStr := ""
-					if hasSel {
-						selChars := 0
-						if selStart.L == selEnd.L {
-							selChars = utf8.RuneCount(b.lines[selStart.L][selStart.C:selEnd.C])
-						} else {
-							selChars += utf8.RuneCount(b.lines[selStart.L][selStart.C:])
-							for idx := selStart.L + 1; idx < selEnd.L; idx++ {
-								selChars += utf8.RuneCount(b.lines[idx])
-							}
-							selChars += utf8.RuneCount(b.lines[selEnd.L][:selEnd.C])
-						}
-						charCountStr = fmt.Sprintf("%d Sel", selChars)
+					drawX := lineNumWidth + currentX - b.hOffset
+					if drawX < lineNumWidth {
+						setCell(lineNumWidth, currentRenderY, ' ', nil, charStyle)
 					} else {
-						charCountStr = fmt.Sprintf("%d Chars", b.totalChars)
-					}
-
-					prefix := " [Ctrl+P] Command Palette | "
-					encodeStr := "Encode:" + modeName
-
-					roStr := ""
-					if b.isReadOnly {
-						roStr = " | 🔒 READONLY"
-					}
-
-					displayPath := b.filePath
-					if displayPath == "" {
-						displayPath = "New Buffer"
-					} else {
-						pathRunes := []rune(displayPath)
-						if len(pathRunes) > 50 {
-							displayPath = "..." + string(pathRunes[len(pathRunes)-47:])
-						}
-					}
-
-					runeCol := 1
-					if b.cursor.L >= 0 && b.cursor.L < len(b.lines) {
-						safeC := b.cursor.C
-						if safeC > len(b.lines[b.cursor.L]) {
-							safeC = len(b.lines[b.cursor.L])
-						}
-						runeCol = utf8.RuneCount(b.lines[b.cursor.L][:safeC]) + 1
-					}
-					suffix := fmt.Sprintf(" | %s | Ln %d, Col %d | %s%s ", charCountStr, b.cursor.L+1, runeCol, displayPath, roStr)
-
-					currentX := 0
-					for _, r := range prefix {
-						if currentX < w {
-							setCell(currentX, h-1, r, nil, statusStyle)
-							currentX += runewidth.RuneWidth(r)
-						}
-					}
-					b.encodeBtnX1 = currentX
-					encodeStyle := tcell.StyleDefault.Background(tcell.ColorDarkCyan).Foreground(tcell.ColorWhite).Bold(true)
-					for _, r := range encodeStr {
-						if currentX < w {
-							setCell(currentX, h-1, r, nil, encodeStyle)
-							currentX += runewidth.RuneWidth(r)
-						}
-					}
-					b.encodeBtnX2 = currentX - 1
-					for _, r := range suffix {
-						if currentX < w {
-							setCell(currentX, h-1, r, nil, statusStyle)
-							currentX += runewidth.RuneWidth(r)
-						}
-					}
-
-					for currentX < w {
-						setCell(currentX, h-1, ' ', nil, statusStyle)
-						currentX++
+						setCell(drawX, currentRenderY, r, nil, charStyle)
 					}
 				}
+			}
+			currentX += rw
+			i += size
+		}
 
-				drawMenu := func(isActive bool, title string, items []PaletteItem, cursor, anchorX, anchorY int, outX, outY, outW, outH *int) {
-					if !isActive {
-						return
-					}
-					pWidth := 40
-					if title == " Command Palette " {
-						pWidth = 60
-					}
-					for _, item := range items {
-						w := runewidth.StringWidth(item.Name) + 10
-						if w > pWidth {
-							pWidth = w
-						}
-					}
-					pHeight := len(items) + 2
-					if pHeight > h-4 {
-						pHeight = h - 4
-					}
-
-					pX, pY := anchorX, anchorY
-					if title == " Command Palette " {
-						pX = (w - pWidth) / 2
-						pY = (h - pHeight) / 2
-					}
-					if pX < 0 {
-						pX = 0
-					}
-					if pY < 0 {
-						pY = 0
-					}
-					if pX+pWidth > w {
-						pX = w - pWidth
-					}
-					if pY+pHeight > h {
-						pY = h - pHeight
-					}
-					*outX, *outY, *outW, *outH = pX, pY, pWidth, pHeight
-
-					marginStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorDefault)
-					for y := -1; y <= pHeight; y++ {
-						for x := -1; x <= pWidth; x++ {
-							if pX+x >= 0 && pX+x < w && pY+y >= 0 && pY+y < h {
-								setCell(pX+x, pY+y, ' ', nil, marginStyle)
-							}
-						}
-					}
-
-					borderStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorWhite)
-					itemStyle := tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
-					selectedStyle := tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack).Bold(true)
-
-					visibleItems := pHeight - 2
-
-					// 💡 오프셋이 범위를 벗어나지 않도록 클램핑
-					if e.menuScrollOffset < 0 {
-						e.menuScrollOffset = 0
-					}
-					maxOffset := len(items) - visibleItems
-					if maxOffset < 0 {
-						maxOffset = 0
-					}
-					if e.menuScrollOffset > maxOffset {
-						e.menuScrollOffset = maxOffset
-					}
-					startIdx := e.menuScrollOffset
-
-					for y := 0; y < pHeight; y++ {
-						for x := 0; x < pWidth; x++ {
-							style := itemStyle
-							r := ' '
-							if y == 0 || y == pHeight-1 || x == 0 || x == pWidth-1 {
-								style = borderStyle
-								if y == 0 && x > 0 && x < pWidth-1 {
-									r = '─'
-									// 💡 상단 스크롤 화살표 표시
-									if startIdx > 0 && x == pWidth-3 {
-										r = '▲'
-										style = borderStyle.Foreground(tcell.ColorYellow).Bold(true)
-									}
-								}
-								if y == pHeight-1 && x > 0 && x < pWidth-1 {
-									r = '─'
-									// 💡 하단 스크롤 화살표 표시
-									if startIdx+visibleItems < len(items) && x == pWidth-3 {
-										r = '▼'
-										style = borderStyle.Foreground(tcell.ColorYellow).Bold(true)
-									}
-								}
-								if x == 0 && y > 0 && y < pHeight-1 {
-									r = '│'
-								}
-								if x == pWidth-1 && y > 0 && y < pHeight-1 {
-									r = '│'
-								}
-								if x == 0 && y == 0 {
-									r = '┌'
-								}
-								if x == pWidth-1 && y == 0 {
-									r = '┐'
-								}
-								if x == 0 && y == pHeight-1 {
-									r = '└'
-								}
-								if x == pWidth-1 && y == pHeight-1 {
-									r = '┘'
-								}
-							}
-							setCell(pX+x, pY+y, r, nil, style)
-						}
-					}
-
-					if title != "" {
-						tx := pX + (pWidth-runewidth.StringWidth(title))/2
-						for i, r := range title {
-							setCell(tx+i, pY, r, nil, borderStyle)
-						}
-					}
-
-					for i := 0; i < visibleItems && startIdx+i < len(items); i++ {
-						idx := startIdx + i
-						item := items[idx]
-						style := itemStyle
-						if idx == cursor {
-							style = selectedStyle
-						}
-
-						for x := 1; x < pWidth-1; x++ {
-							setCell(pX+x, pY+1+i, ' ', nil, style)
-						}
-
-						strName := " " + item.Name
-						strShortcut := item.Shortcut + " "
-						cx := pX + 1
-						for _, r := range strName {
-							setCell(cx, pY+1+i, r, nil, style)
-							cx += runewidth.RuneWidth(r)
-						}
-						scLen := runewidth.StringWidth(strShortcut)
-						cx = pX + pWidth - 1 - scLen
-						for _, r := range strShortcut {
-							setCell(cx, pY+1+i, r, nil, style)
-							cx += runewidth.RuneWidth(r)
-						}
-					}
-					cursorVX = -1
+		if !vl.isWrapped || vl.endCX == len(lineData) {
+			if hasSel {
+				selected := false
+				i := len(lineData)
+				if lineIdx > selStart.L && lineIdx < selEnd.L {
+					selected = true
 				}
-
-				drawMenu(e.paletteActive, " Command Palette ", e.paletteItems, e.paletteCursor, 0, 0, &e.paletteX, &e.paletteY, &e.paletteW, &e.paletteH)
-				drawMenu(e.ctxMenuActive, "", e.ctxMenuItems, e.ctxMenuCursor, e.ctxMenuX, e.ctxMenuY, &e.ctxMenuX, &e.ctxMenuY, &e.ctxMenuW, &e.ctxMenuH)
-				drawMenu(e.encodeMenuActive, e.encodeMenuTitle, e.encodeMenuItems, e.encodeMenuCursor, e.encodeMenuX, e.encodeMenuY, &e.encodeMenuX, &e.encodeMenuY, &e.encodeMenuW, &e.encodeMenuH)
-
-				e.prevActiveBuf = e.activeBuffer
-				e.prevVOffset = b.vOffsetL
-				e.prevVOffsetSub = b.vOffsetSub
-				e.prevHOffset = b.hOffset
-				e.prevPalette = e.paletteActive
-				e.prevCtxMenu = e.ctxMenuActive
-				e.prevEncode = e.encodeMenuActive
-				e.prevPrompt = e.promptMode
-				e.prevSearch = b.searchMode
-				e.prevGoto = b.gotoMode
-				e.prevReplace = b.isReplace
-				e.prevLinesLen = len(b.lines)
-
-				e.prevCursor = b.cursor
-				e.prevSelStart = b.selection.Start
-				e.prevSelEnd = b.selection.End
-				e.prevTotalChars = b.totalChars
-				e.prevTxID = b.txIDCounter
-				e.prevIsSelecting = b.isSelecting
-
-				b.dirtyStartL = -1
-
-				if cursorVX >= lineNumWidth && cursorVX < w && cursorVY >= 0 && cursorVY < h {
-					s.ShowCursor(cursorVX, cursorVY)
-				} else {
-					s.HideCursor()
+				if lineIdx == selStart.L && lineIdx == selEnd.L {
+					selected = i >= selStart.C && i < selEnd.C
 				}
-				s.Show()
-}
-func runeSliceEqual(a, b []rune) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+				if lineIdx == selStart.L && lineIdx < selEnd.L {
+					selected = i >= selStart.C
+				}
+				if lineIdx == selEnd.L && lineIdx > selStart.L {
+					selected = i < selEnd.C
+				}
+				if selected {
+					if currentX >= b.hOffset && currentX < b.hOffset+textMaxWidth {
+						setCell(lineNumWidth+currentX-b.hOffset, currentRenderY, ' ', nil, selectedStyle)
+					}
+				}
+			}
+		}
+
+		if lineIdx == b.cursor.L && b.cursor.C == vl.endCX {
+			if b.cursor.C == len(lineData) || currSub+1 >= len(vcls) || b.stickToWrapEnd { // 🟢 vIdx 불필요
+				cursorVX = lineNumWidth + currentX - b.hOffset
+				cursorVY = currentRenderY
+			}
+		}
+
+		vlWidth := vl.width
+
+		showLeftIndicator := b.hOffset > 0 && vlWidth > 0
+		showRightIndicator := vlWidth > b.hOffset+textMaxWidth
+
+		if showLeftIndicator || showRightIndicator {
+			indicatorStyle := lineStyle.Foreground(tcell.ColorDarkCyan).Bold(true)
+
+			if showLeftIndicator {
+				indX := lineNumWidth - 1
+				if lineNumWidth <= 0 {
+					indX = 0
+				}
+				if indX >= 0 && indX < w {
+					mainc, _, _, _ := s.GetContent(indX, currentRenderY)
+					if runewidth.RuneWidth(mainc) == 2 {
+						setCell(indX, currentRenderY, ' ', nil, lineStyle)
+						if indX+1 < w {
+							setCell(indX+1, currentRenderY, ' ', nil, lineStyle)
+						}
+					}
+				}
+				setCell(indX, currentRenderY, '<', nil, indicatorStyle)
+			}
+
+			if showRightIndicator {
+				if w-2 >= 0 {
+					mainc, _, _, _ := s.GetContent(w-2, currentRenderY)
+					if runewidth.RuneWidth(mainc) == 2 {
+						setCell(w-2, currentRenderY, ' ', nil, lineStyle)
+					}
+				}
+				if w-1 >= 0 {
+					mainc, _, _, _ := s.GetContent(w-1, currentRenderY)
+					if runewidth.RuneWidth(mainc) == 2 {
+						setCell(w-1, currentRenderY, ' ', nil, lineStyle)
+					}
+				}
+				setCell(w-1, currentRenderY, '>', nil, indicatorStyle)
+			}
+		}
+		currentRenderY++
+		currSub++
+		if currSub >= len(vcls) {
+			currSub = 0
+			currL++
 		}
 	}
-	return true
+
+	for y := currentRenderY; y < h-1; y++ {
+		for x := 0; x < w; x++ {
+			setCell(x, y, ' ', nil, tcell.StyleDefault)
+		}
+	}
+
+	if e.promptMode {
+		var promptMsg string
+		if e.promptType == "quit" {
+			promptMsg = " [Warning] 저장되지 않은 탭이 있습니다. 무시하고 종료할까요? (y/n)"
+		} else if e.promptType == "close" {
+			promptMsg = " [Warning] 변경된 내용이 있습니다. 탭을 닫을까요? (y/n)"
+		} else if e.promptType == "reset_config" {
+			promptMsg = " [Warning] 설정을 기본값으로 초기화하시겠습니까? (y/n)"
+		} else if e.promptType == "reopen" {
+			promptMsg = " [Warning] 변경된 내용이 있습니다. 무시하고 다시 열까요? (y/n)"
+		} else if e.promptType == "close_config" {
+			promptMsg = " [Warning] 설정이 저장되지 않았습니다. 무시하고 닫을까요? (y/n)"
+		} else if e.promptType == "external_change" {
+			fileName := ""
+			if e.targetCloseBuffer >= 0 && e.targetCloseBuffer < len(e.buffers) {
+				fileName = filepath.Base(e.buffers[e.targetCloseBuffer].filePath)
+			}
+			promptMsg = fmt.Sprintf(" [Warning] '%s' 파일이 외부에서 변경되었습니다. 디스크 내용으로 덮어쓸까요? (y/n)", fileName)
+		} else if e.promptType == "alert" {
+			promptMsg = " [Alert] " + e.alertMessage + " (Enter/Esc)"
+		}
+
+		promptStyle := tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite).Bold(true)
+
+		currentX := 0
+		for _, r := range promptMsg {
+			if currentX < w {
+				setCell(currentX, h-1, r, nil, promptStyle)
+				currentX += runewidth.RuneWidth(r)
+			}
+		}
+		for currentX < w {
+			setCell(currentX, h-1, ' ', nil, promptStyle)
+			currentX++
+		}
+		cursorVX = runewidth.StringWidth(promptMsg)
+		cursorVY = h - 1
+
+	} else if b.searchMode || b.gotoMode {
+		closeBtn := " [X] "
+		b.closeBtnStartX = w - len(closeBtn)
+		b.closeBtnEndX = w - 1
+
+		checkboxArea := ""
+		if !b.gotoMode {
+			cbRegex := "[ ] .*"
+			if b.searchRegex {
+				cbRegex = "[x] .*"
+			}
+			cbCase := "[ ] Aa"
+			if b.searchCase {
+				cbCase = "[x] Aa"
+			}
+			cbWord := "[ ] \\b"
+			if b.searchWord {
+				cbWord = "[x] \\b"
+			}
+			checkboxArea = " " + cbRegex + "  " + cbCase + "  " + cbWord + " "
+		}
+		cbLen := runewidth.StringWidth(checkboxArea)
+		cbStartX := b.closeBtnStartX - cbLen
+
+		if !b.gotoMode {
+			b.chkRegexX1 = cbStartX + 1
+			b.chkRegexX2 = b.chkRegexX1 + 6
+			b.chkCaseX1 = b.chkRegexX2 + 2
+			b.chkCaseX2 = b.chkCaseX1 + 6
+			b.chkWordX1 = b.chkCaseX2 + 2
+			b.chkWordX2 = b.chkWordX1 + 6
+		}
+
+		var prefix, suffix string
+		var targetStr *[]rune
+
+		if b.gotoMode {
+			prefix = " [Go To] Line,Col: "
+			targetStr = &b.gotoInput
+			suffix = "  (Enter: 이동, Esc: 취소)"
+		} else if b.isReplace {
+			if b.replaceStep == 1 {
+				prefix = " [Replace] Find: "
+				targetStr = &b.searchQuery
+			} else if b.replaceStep == 2 {
+				prefix = " [Replace] Find: " + string(b.searchQuery) + "  ➔ Replace: "
+				targetStr = &b.replaceQuery
+			} else {
+				matchCountStr := "0/0"
+				if len(b.matches) > 0 {
+					totStr := sprintfRight(len(b.matches), 0)
+					if b.searchCapped {
+						totStr += "+"
+					}
+					matchCountStr = sprintfRight(b.matchIdx+1, 0) + "/" + totStr
+				}
+				prefix = " [Replace] Find: " + string(b.searchQuery) + "  ➔ Replace: " + string(b.replaceQuery) + "  [" + matchCountStr + "] (Enter:바꾸기, Up:이전, Down:건너뛰기, Ctrl+A:모두)"
+				targetStr = nil
+			}
+		} else {
+			matchCountStr := "0/0"
+			if len(b.matches) > 0 {
+				totStr := sprintfRight(len(b.matches), 0)
+				if b.searchCapped {
+					totStr += "+"
+				}
+				matchCountStr = sprintfRight(b.matchIdx+1, 0) + "/" + totStr
+			}
+			prefix = " [Find] Search: "
+			targetStr = &b.searchQuery
+			suffix = "  [" + matchCountStr + "] (Enter/Down:다음, Up:이전)"
+		}
+
+		currentX := 0
+		for _, r := range prefix {
+			if currentX < cbStartX {
+				setCell(currentX, h-1, r, nil, statusStyle)
+				currentX += runewidth.RuneWidth(r)
+			}
+		}
+
+		inputStartX := currentX
+		if targetStr != nil {
+			selStart, selEnd := b.inputSelStart, b.inputSelEnd
+			if selStart > selEnd {
+				selStart, selEnd = selEnd, selStart
+			}
+
+			for i, r := range *targetStr {
+				style := statusStyle
+				if b.isInputSelect && i >= selStart && i < selEnd {
+					style = selectedStyle
+				}
+				if currentX < cbStartX {
+					setCell(currentX, h-1, r, nil, style)
+					currentX += runewidth.RuneWidth(r)
+				}
+			}
+			cursorVX = inputStartX + runewidth.StringWidth(string((*targetStr)[:b.inputCX]))
+		} else {
+			cursorVX = -1
+		}
+
+		for _, r := range suffix {
+			if currentX < cbStartX {
+				setCell(currentX, h-1, r, nil, statusStyle)
+				currentX += runewidth.RuneWidth(r)
+			}
+		}
+		for currentX < cbStartX {
+			setCell(currentX, h-1, ' ', nil, statusStyle)
+			currentX++
+		}
+		cx := cbStartX
+		for _, r := range checkboxArea {
+			setCell(cx, h-1, r, nil, statusStyle)
+			cx += runewidth.RuneWidth(r)
+		}
+		cursorVY = h - 1
+
+		closeStyle := tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite).Bold(true)
+		for i, r := range closeBtn {
+			if b.closeBtnStartX+i < w {
+				setCell(b.closeBtnStartX+i, h-1, r, nil, closeStyle)
+			}
+		}
+
+	} else {
+		modeName := b.encoding
+		if b.isConfig {
+			modeName = "CONFIG.JSON"
+		}
+		charCountStr := ""
+		if hasSel {
+			selChars := 0
+			if selStart.L == selEnd.L {
+				selChars = utf8.RuneCount(b.lines[selStart.L][selStart.C:selEnd.C])
+			} else {
+				selChars += utf8.RuneCount(b.lines[selStart.L][selStart.C:])
+				for idx := selStart.L + 1; idx < selEnd.L; idx++ {
+					selChars += utf8.RuneCount(b.lines[idx])
+				}
+				selChars += utf8.RuneCount(b.lines[selEnd.L][:selEnd.C])
+			}
+			charCountStr = fmt.Sprintf("%d Sel", selChars)
+		} else {
+			charCountStr = fmt.Sprintf("%d Chars", b.totalChars)
+		}
+
+		prefix := " [Ctrl+P] Command Palette | "
+		encodeStr := "Encode:" + modeName
+
+		roStr := ""
+		if b.isReadOnly {
+			roStr = " | 🔒 READONLY"
+		}
+
+		displayPath := b.filePath
+		if displayPath == "" {
+			displayPath = "New Buffer"
+		} else {
+			pathRunes := []rune(displayPath)
+			if len(pathRunes) > 50 {
+				displayPath = "..." + string(pathRunes[len(pathRunes)-47:])
+			}
+		}
+
+		runeCol := 1
+		if b.cursor.L >= 0 && b.cursor.L < len(b.lines) {
+			safeC := b.cursor.C
+			if safeC > len(b.lines[b.cursor.L]) {
+				safeC = len(b.lines[b.cursor.L])
+			}
+			runeCol = utf8.RuneCount(b.lines[b.cursor.L][:safeC]) + 1
+		}
+		suffix := fmt.Sprintf(" | %s | Ln %d, Col %d | %s%s ", charCountStr, b.cursor.L+1, runeCol, displayPath, roStr)
+
+		currentX := 0
+		for _, r := range prefix {
+			if currentX < w {
+				setCell(currentX, h-1, r, nil, statusStyle)
+				currentX += runewidth.RuneWidth(r)
+			}
+		}
+		b.encodeBtnX1 = currentX
+		encodeStyle := tcell.StyleDefault.Background(tcell.ColorDarkCyan).Foreground(tcell.ColorWhite).Bold(true)
+		for _, r := range encodeStr {
+			if currentX < w {
+				setCell(currentX, h-1, r, nil, encodeStyle)
+				currentX += runewidth.RuneWidth(r)
+			}
+		}
+		b.encodeBtnX2 = currentX - 1
+		for _, r := range suffix {
+			if currentX < w {
+				setCell(currentX, h-1, r, nil, statusStyle)
+				currentX += runewidth.RuneWidth(r)
+			}
+		}
+
+		for currentX < w {
+			setCell(currentX, h-1, ' ', nil, statusStyle)
+			currentX++
+		}
+	}
+
+	drawMenu := func(isActive bool, title string, items []PaletteItem, cursor, anchorX, anchorY int, outX, outY, outW, outH *int) {
+		if !isActive {
+			return
+		}
+		pWidth := 40
+		if title == " Command Palette " {
+			pWidth = 60
+		}
+		for _, item := range items {
+			w := runewidth.StringWidth(item.Name) + 10
+			if w > pWidth {
+				pWidth = w
+			}
+		}
+		pHeight := len(items) + 2
+		if pHeight > h-4 {
+			pHeight = h - 4
+		}
+
+		pX, pY := anchorX, anchorY
+		if title == " Command Palette " {
+			pX = (w - pWidth) / 2
+			pY = (h - pHeight) / 2
+		}
+		if pX < 0 {
+			pX = 0
+		}
+		if pY < 0 {
+			pY = 0
+		}
+		if pX+pWidth > w {
+			pX = w - pWidth
+		}
+		if pY+pHeight > h {
+			pY = h - pHeight
+		}
+		*outX, *outY, *outW, *outH = pX, pY, pWidth, pHeight
+
+		marginStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorDefault)
+		for y := -1; y <= pHeight; y++ {
+			for x := -1; x <= pWidth; x++ {
+				if pX+x >= 0 && pX+x < w && pY+y >= 0 && pY+y < h {
+					setCell(pX+x, pY+y, ' ', nil, marginStyle)
+				}
+			}
+		}
+
+		borderStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorWhite)
+		itemStyle := tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite)
+		selectedStyle := tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack).Bold(true)
+
+		visibleItems := pHeight - 2
+
+		// 💡 오프셋이 범위를 벗어나지 않도록 클램핑
+		if e.menuScrollOffset < 0 {
+			e.menuScrollOffset = 0
+		}
+		maxOffset := len(items) - visibleItems
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if e.menuScrollOffset > maxOffset {
+			e.menuScrollOffset = maxOffset
+		}
+		startIdx := e.menuScrollOffset
+
+		for y := 0; y < pHeight; y++ {
+			for x := 0; x < pWidth; x++ {
+				style := itemStyle
+				r := ' '
+				if y == 0 || y == pHeight-1 || x == 0 || x == pWidth-1 {
+					style = borderStyle
+					if y == 0 && x > 0 && x < pWidth-1 {
+						r = '─'
+						// 💡 상단 스크롤 화살표 표시
+						if startIdx > 0 && x == pWidth-3 {
+							r = '▲'
+							style = borderStyle.Foreground(tcell.ColorYellow).Bold(true)
+						}
+					}
+					if y == pHeight-1 && x > 0 && x < pWidth-1 {
+						r = '─'
+						// 💡 하단 스크롤 화살표 표시
+						if startIdx+visibleItems < len(items) && x == pWidth-3 {
+							r = '▼'
+							style = borderStyle.Foreground(tcell.ColorYellow).Bold(true)
+						}
+					}
+					if x == 0 && y > 0 && y < pHeight-1 {
+						r = '│'
+					}
+					if x == pWidth-1 && y > 0 && y < pHeight-1 {
+						r = '│'
+					}
+					if x == 0 && y == 0 {
+						r = '┌'
+					}
+					if x == pWidth-1 && y == 0 {
+						r = '┐'
+					}
+					if x == 0 && y == pHeight-1 {
+						r = '└'
+					}
+					if x == pWidth-1 && y == pHeight-1 {
+						r = '┘'
+					}
+				}
+				setCell(pX+x, pY+y, r, nil, style)
+			}
+		}
+
+		if title != "" {
+			tx := pX + (pWidth-runewidth.StringWidth(title))/2
+			for i, r := range title {
+				setCell(tx+i, pY, r, nil, borderStyle)
+			}
+		}
+
+		for i := 0; i < visibleItems && startIdx+i < len(items); i++ {
+			idx := startIdx + i
+			item := items[idx]
+			style := itemStyle
+			if idx == cursor {
+				style = selectedStyle
+			}
+
+			for x := 1; x < pWidth-1; x++ {
+				setCell(pX+x, pY+1+i, ' ', nil, style)
+			}
+
+			strName := " " + item.Name
+			strShortcut := item.Shortcut + " "
+			cx := pX + 1
+			for _, r := range strName {
+				setCell(cx, pY+1+i, r, nil, style)
+				cx += runewidth.RuneWidth(r)
+			}
+			scLen := runewidth.StringWidth(strShortcut)
+			cx = pX + pWidth - 1 - scLen
+			for _, r := range strShortcut {
+				setCell(cx, pY+1+i, r, nil, style)
+				cx += runewidth.RuneWidth(r)
+			}
+		}
+		cursorVX = -1
+	}
+
+	drawMenu(e.paletteActive, " Command Palette ", e.paletteItems, e.paletteCursor, 0, 0, &e.paletteX, &e.paletteY, &e.paletteW, &e.paletteH)
+	drawMenu(e.ctxMenuActive, "", e.ctxMenuItems, e.ctxMenuCursor, e.ctxMenuX, e.ctxMenuY, &e.ctxMenuX, &e.ctxMenuY, &e.ctxMenuW, &e.ctxMenuH)
+	drawMenu(e.encodeMenuActive, e.encodeMenuTitle, e.encodeMenuItems, e.encodeMenuCursor, e.encodeMenuX, e.encodeMenuY, &e.encodeMenuX, &e.encodeMenuY, &e.encodeMenuW, &e.encodeMenuH)
+
+	e.prevActiveBuf = e.activeBuffer
+	e.prevVOffset = b.vOffsetL
+	e.prevVOffsetSub = b.vOffsetSub
+	e.prevHOffset = b.hOffset
+	e.prevPalette = e.paletteActive
+	e.prevCtxMenu = e.ctxMenuActive
+	e.prevEncode = e.encodeMenuActive
+	e.prevPrompt = e.promptMode
+	e.prevSearch = b.searchMode
+	e.prevGoto = b.gotoMode
+	e.prevReplace = b.isReplace
+	e.prevLinesLen = len(b.lines)
+
+	e.prevCursor = b.cursor
+	e.prevSelStart = b.selection.Start
+	e.prevSelEnd = b.selection.End
+	e.prevTotalChars = b.totalChars
+	e.prevTxID = b.txIDCounter
+	e.prevIsSelecting = b.isSelecting
+
+	b.dirtyStartL = -1
+
+	if cursorVX >= lineNumWidth && cursorVX < w && cursorVY >= 0 && cursorVY < h {
+		s.ShowCursor(cursorVX, cursorVY)
+	} else {
+		s.HideCursor()
+	}
+	s.Show()
 }
 
 var globalScreenHandle *tcell.Screen
@@ -2984,9 +2843,9 @@ func (e *Editor) openFile(s tcell.Screen) {
 		s.Suspend()
 		errConfirm := zenity.Question(
 			fmt.Sprintf("파일 크기가 매우 큽니다 (%.1f MB).\n열면 속도가 느려지거나 멈출 수 있습니다. 계속 진행하시겠습니까?", float64(fileInfo.Size())/(1024*1024)),
-					      zenity.Title("대용량 파일 경고"),
-					      zenity.OKLabel("예"),
-					      zenity.CancelLabel("아니오"),
+			zenity.Title("대용량 파일 경고"),
+			zenity.OKLabel("예"),
+			zenity.CancelLabel("아니오"),
 		)
 		s.Resume()
 		s.Sync()
@@ -3020,7 +2879,6 @@ func (e *Editor) openFile(s tcell.Screen) {
 	b.updateSavedFileInfo()
 	e.buffers = append(e.buffers, b)
 	e.activeBuffer = len(e.buffers) - 1
-	debug.FreeOSMemory() // 💡 파일 열기 후 즉각 메모리 반환
 }
 
 func (e *Editor) saveActiveFile(s tcell.Screen) {
@@ -3135,7 +2993,6 @@ func (e *Editor) toggleConfigBuffer() {
 	configBuf.updateSavedFileInfo()
 	e.buffers = append(e.buffers, configBuf)
 	e.activeBuffer = len(e.buffers) - 1
-	debug.FreeOSMemory() // 💡 설정 열기 후 즉시 메모리 반환
 }
 
 // --- [ 5. 검색 및 치환 로직 ] ---
@@ -3563,9 +3420,9 @@ func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
 		}
 		errConfirm := zenity.Question(
 			fmt.Sprintf("파일 크기가 매우 큽니다 (%.1f MB).\n열면 속도가 느려지거나 멈출 수 있습니다. 계속 진행하시겠습니까?", float64(fileInfo.Size())/(1024*1024)),
-					      zenity.Title("대용량 파일 경고"),
-					      zenity.OKLabel("예"),
-					      zenity.CancelLabel("아니오"),
+			zenity.Title("대용량 파일 경고"),
+			zenity.OKLabel("예"),
+			zenity.CancelLabel("아니오"),
 		)
 		if globalScreenHandle != nil && *globalScreenHandle != nil {
 			(*globalScreenHandle).Resume()
@@ -3595,7 +3452,6 @@ func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
 		b.endsWithNewline = endsWithNewline
 		b.savedStrongHash = b.computeStrongHash()
 		b.updateSavedFileInfo()
-		debug.FreeOSMemory() // 💡 로딩 후 즉시 메모리 반환
 	}
 
 	if !e.initialBufferUsed && len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified && !e.buffers[0].isConfig {
@@ -3641,7 +3497,6 @@ func (e *Editor) focusOrOpenConfig(isReadOnly bool) {
 	b.endsWithNewline = endsWithNewline
 	b.savedStrongHash = b.computeStrongHash()
 	b.updateSavedFileInfo()
-	debug.FreeOSMemory() // 💡 설정 로딩 후 즉시 메모리 반환
 
 	if !e.initialBufferUsed && len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified && !e.buffers[0].isConfig {
 		e.buffers[0] = b
@@ -3667,51 +3522,51 @@ func main() {
 
 	for _, arg := range os.Args[1:] {
 		switch arg {
-			case "-R", "--readonly":
-				currentRO = true
-			case "-e", "--edit":
-				currentRO = false
-			case "-c", "--config":
-				actions = append(actions, StartupAction{Type: "config", ReadOnly: currentRO})
-			case "-o", "--open":
-				actions = append(actions, StartupAction{Type: "picker", ReadOnly: currentRO})
-			case "-n", "--new":
-				actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
-			case "-v", "--version":
-				fmt.Println("jigedit v1.2.2 - A Sane Editor For The Sane People")
-				os.Exit(0)
-			case "-h", "--help":
-				fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
-				fmt.Println("[FLAGS] (except -h,-v) can be stacked")
-				fmt.Println("  -o, --open      Open file picker to select files")
-				fmt.Println("  -c, --config    Open config.json")
-				fmt.Println("  -n, --new       Open a new empty tab") // 💡 추가됨
-				fmt.Println("  -R, --readonly  Open subsequent files in READ-ONLY mode")
-				fmt.Println("  -e, --edit      Open subsequent files in EDIT mode (default)")
-				fmt.Println("  -v, --version   Print version")
-				fmt.Println("  -h, --help      Print help")
-				fmt.Println("\nExample: jigedit -c -o -R file1.txt -e file2.txt -o -R folder/file3.txt")
-				os.Exit(0)
-			default:
-				// 짧은 플래그 결합 지원 (-Rc, -Ro 등)
-				if strings.HasPrefix(arg, "-") && len(arg) > 1 && !strings.HasPrefix(arg, "--") {
-					for _, ch := range arg[1:] {
-						if ch == 'R' {
-							currentRO = true
-						}
-						if ch == 'e' {
-							currentRO = false
-						}
-						if ch == 'c' {
-							actions = append(actions, StartupAction{Type: "config", ReadOnly: currentRO})
-						}
-						if ch == 'o' {
-							actions = append(actions, StartupAction{Type: "picker", ReadOnly: currentRO})
-						}
+		case "-R", "--readonly":
+			currentRO = true
+		case "-e", "--edit":
+			currentRO = false
+		case "-c", "--config":
+			actions = append(actions, StartupAction{Type: "config", ReadOnly: currentRO})
+		case "-o", "--open":
+			actions = append(actions, StartupAction{Type: "picker", ReadOnly: currentRO})
+		case "-n", "--new":
+			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
+		case "-v", "--version":
+			fmt.Println("jigedit v1.2.3 - A Sane Editor For The Sane People")
+			os.Exit(0)
+		case "-h", "--help":
+			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
+			fmt.Println("[FLAGS] (except -h,-v) can be stacked")
+			fmt.Println("  -o, --open      Open file picker to select files")
+			fmt.Println("  -c, --config    Open config.json")
+			fmt.Println("  -n, --new       Open a new empty tab") // 💡 추가됨
+			fmt.Println("  -R, --readonly  Open subsequent files in READ-ONLY mode")
+			fmt.Println("  -e, --edit      Open subsequent files in EDIT mode (default)")
+			fmt.Println("  -v, --version   Print version")
+			fmt.Println("  -h, --help      Print help")
+			fmt.Println("\nExample: jigedit -c -o -R file1.txt -e file2.txt -o -R folder/file3.txt")
+			os.Exit(0)
+		default:
+			// 짧은 플래그 결합 지원 (-Rc, -Ro 등)
+			if strings.HasPrefix(arg, "-") && len(arg) > 1 && !strings.HasPrefix(arg, "--") {
+				for _, ch := range arg[1:] {
+					if ch == 'R' {
+						currentRO = true
 					}
-				} else {
-					actions = append(actions, StartupAction{Type: "file", Path: arg, ReadOnly: currentRO})
+					if ch == 'e' {
+						currentRO = false
+					}
+					if ch == 'c' {
+						actions = append(actions, StartupAction{Type: "config", ReadOnly: currentRO})
+					}
+					if ch == 'o' {
+						actions = append(actions, StartupAction{Type: "picker", ReadOnly: currentRO})
+					}
 				}
+			} else {
+				actions = append(actions, StartupAction{Type: "file", Path: arg, ReadOnly: currentRO})
+			}
 		}
 	}
 
@@ -3801,1600 +3656,1612 @@ func main() {
 
 		ev := currentScreen.PollEvent()
 		switch ev := ev.(type) {
-			case *tcell.EventResize:
-				currentScreen.Sync()
-				needsLayout = true
-				snapToCursor = true
-				editor.needsFullRefresh = true
-			case *tcell.EventInterrupt:
-				filePath, ok := ev.Data().(string)
-				if ok {
-					// 💡 [안전장치 아키텍처]: 가변 슬라이스의 루프 인덱스 직접 참조를 폐기하고 안전하게 스냅샷 참조
-					var targetBufs []*Buffer
-					for _, buf := range editor.buffers {
-						if buf != nil && buf.filePath == filePath {
-							targetBufs = append(targetBufs, buf)
+		case *tcell.EventResize:
+			currentScreen.Sync()
+			needsLayout = true
+			snapToCursor = true
+			editor.needsFullRefresh = true
+		case *tcell.EventInterrupt:
+			filePath, ok := ev.Data().(string)
+			if ok {
+				// 💡 [안전장치 아키텍처]: 가변 슬라이스의 루프 인덱스 직접 참조를 폐기하고 안전하게 스냅샷 참조
+				var targetBufs []*Buffer
+				for _, buf := range editor.buffers {
+					if buf != nil && buf.filePath == filePath {
+						targetBufs = append(targetBufs, buf)
+					}
+				}
+
+				for _, buf := range targetBufs {
+					// 현재 활성화된 에디터 버퍼 슬라이스 내에 여전히 존재하는지 재차 교차 검증
+					exists := false
+					targetIdx := -1
+					for idx, currentBuf := range editor.buffers {
+						if currentBuf == buf {
+							exists = true
+							targetIdx = idx
+							break
+						}
+					}
+					if !exists || targetIdx == -1 {
+						continue
+					}
+
+					// 💡 우리가 방금 쓴 변경(저장)이면 디스크 재읽기 자체를 건너뜀
+					if info, err := os.Stat(filePath); err == nil {
+						if info.ModTime().Equal(buf.savedModTime) && info.Size() == buf.savedSize {
+							continue
 						}
 					}
 
-					for _, buf := range targetBufs {
-						// 현재 활성화된 에디터 버퍼 슬라이스 내에 여전히 존재하는지 재차 교차 검증
-						exists := false
-						targetIdx := -1
-						for idx, currentBuf := range editor.buffers {
-							if currentBuf == buf {
-								exists = true
-								targetIdx = idx
+					// 💡 수정된 부분: 파일 감지기도 현재 탭의 인코딩을 존중합니다.
+					lines, encoding, incomingChars, incomingHash, incomingEndsWithNL, err := loadFileLines(filePath, buf.encoding)
+					if err == nil {
+						if incomingHash != buf.savedHash || incomingChars != buf.savedTotalChars {
+							if buf.isModified {
+								alreadyQueued := false
+								for _, q := range editor.externalChangeQueue {
+									if q == targetIdx {
+										alreadyQueued = true
+										break
+									}
+								}
+								if !alreadyQueued {
+									editor.externalChangeQueue = append(editor.externalChangeQueue, targetIdx)
+								}
+								editor.promptMode = true
+								editor.promptType = "external_change"
+								editor.targetCloseBuffer = editor.externalChangeQueue[0]
+								needsLayout = true
+							} else {
+								buf.reloadFromLines(lines, encoding, incomingChars, incomingHash, incomingEndsWithNL)
+								if buf.isConfig {
+									var newCfg Config
+									if err := json.Unmarshal([]byte(buf.getContent()), &newCfg); err == nil {
+										editor.cfg = newCfg
+									}
+								}
+								needsLayout = true
+								snapToCursor = true
+							}
+						}
+					}
+				}
+			}
+		case *tcell.EventMouse:
+			mx, my := ev.Position()
+			mouseMoved := (editor.mouseX != mx || editor.mouseY != my)
+			editor.mouseX = mx
+			editor.mouseY = my
+			buttons := ev.Buttons()
+			isWheel := (buttons&tcell.WheelUp != 0) || (buttons&tcell.WheelDown != 0) || (buttons&tcell.WheelLeft != 0) || (buttons&tcell.WheelRight != 0)
+
+			var isNewPress, isDrag bool
+			if isWheel {
+				isNewPress = false
+				isDrag = (lastMouseButtons&tcell.Button1 != 0)
+			} else {
+				oldButtons := lastMouseButtons
+				lastMouseButtons = buttons
+				isNewPress = (buttons&tcell.Button1 != 0) && (oldButtons&tcell.Button1 == 0)
+				isDrag = (buttons&tcell.Button1 != 0) && !isNewPress
+			}
+
+			if (buttons&tcell.Button3 != 0 || buttons&tcell.Button2 != 0) && !editor.paletteActive {
+				editor.ctxMenuActive = true
+				editor.ctxMenuX = mx
+				editor.ctxMenuY = my
+				editor.ctxMenuCursor = 0
+				editor.paletteActive = false
+				editor.encodeMenuActive = false
+				needsLayout = true
+				continue
+			}
+
+			if editor.ctxMenuActive {
+				if mx >= editor.ctxMenuX && mx < editor.ctxMenuX+editor.ctxMenuW && my >= editor.ctxMenuY && my < editor.ctxMenuY+editor.ctxMenuH {
+					_, screenH := currentScreen.Size()
+					pageStep := screenH - 6
+					if pageStep < 5 {
+						pageStep = 5
+					}
+					visibleItems := editor.ctxMenuH - 2
+
+					if isWheel {
+						if buttons&tcell.WheelUp != 0 {
+							editor.menuScrollOffset -= 3
+							if editor.menuScrollOffset < 0 {
+								editor.menuScrollOffset = 0
+							}
+							needsLayout = true
+						} else if buttons&tcell.WheelDown != 0 {
+							editor.menuScrollOffset += 3
+							maxOffset := len(editor.ctxMenuItems) - visibleItems
+							if maxOffset < 0 {
+								maxOffset = 0
+							}
+							if editor.menuScrollOffset > maxOffset {
+								editor.menuScrollOffset = maxOffset
+							}
+							needsLayout = true
+						}
+						continue
+					}
+
+					clickIdx := my - editor.ctxMenuY - 1
+
+					if isNewPress {
+						if my == editor.ctxMenuY && mx >= editor.ctxMenuX+editor.ctxMenuW-4 && mx <= editor.ctxMenuX+editor.ctxMenuW-2 {
+							editor.menuScrollOffset -= pageStep
+							if editor.menuScrollOffset < 0 {
+								editor.menuScrollOffset = 0
+							}
+							needsLayout = true
+							continue
+						}
+						if my == editor.ctxMenuY+editor.ctxMenuH-1 && mx >= editor.ctxMenuX+editor.ctxMenuW-4 && mx <= editor.ctxMenuX+editor.ctxMenuW-2 {
+							editor.menuScrollOffset += pageStep
+							maxOffset := len(editor.ctxMenuItems) - visibleItems
+							if maxOffset < 0 {
+								maxOffset = 0
+							}
+							if editor.menuScrollOffset > maxOffset {
+								editor.menuScrollOffset = maxOffset
+							}
+							needsLayout = true
+							continue
+						}
+					}
+
+					if clickIdx >= 0 && clickIdx < visibleItems {
+						targetItemIdx := editor.menuScrollOffset + clickIdx
+						if targetItemIdx >= 0 && targetItemIdx < len(editor.ctxMenuItems) {
+							if mouseMoved {
+								editor.ctxMenuCursor = targetItemIdx
+								needsLayout = true
+							}
+							if isNewPress {
+								editor.ctxMenuCursor = targetItemIdx
+								action := editor.ctxMenuItems[editor.ctxMenuCursor].Action
+								editor.ctxMenuActive = false
+								if action != nil {
+									action(editor, currentScreen)
+								}
+								needsLayout = true
+							}
+						}
+					}
+				} else if isNewPress {
+					editor.ctxMenuActive = false
+					needsLayout = true
+				}
+				continue
+			}
+
+			if editor.encodeMenuActive {
+				if mx >= editor.encodeMenuX && mx < editor.encodeMenuX+editor.encodeMenuW && my >= editor.encodeMenuY && my < editor.encodeMenuY+editor.encodeMenuH {
+					_, screenH := currentScreen.Size()
+					pageStep := screenH - 6
+					if pageStep < 5 {
+						pageStep = 5
+					}
+					visibleItems := editor.encodeMenuH - 2
+
+					if isWheel {
+						if buttons&tcell.WheelUp != 0 {
+							editor.menuScrollOffset -= 3
+							if editor.menuScrollOffset < 0 {
+								editor.menuScrollOffset = 0
+							}
+							needsLayout = true
+						} else if buttons&tcell.WheelDown != 0 {
+							editor.menuScrollOffset += 3
+							maxOffset := len(editor.encodeMenuItems) - visibleItems
+							if maxOffset < 0 {
+								maxOffset = 0
+							}
+							if editor.menuScrollOffset > maxOffset {
+								editor.menuScrollOffset = maxOffset
+							}
+							needsLayout = true
+						}
+						continue
+					}
+
+					clickIdx := my - editor.encodeMenuY - 1
+
+					if isNewPress {
+						if my == editor.encodeMenuY && mx >= editor.encodeMenuX+editor.encodeMenuW-4 && mx <= editor.encodeMenuX+editor.encodeMenuW-2 {
+							editor.menuScrollOffset -= pageStep
+							if editor.menuScrollOffset < 0 {
+								editor.menuScrollOffset = 0
+							}
+							needsLayout = true
+							continue
+						}
+						if my == editor.encodeMenuY+editor.encodeMenuH-1 && mx >= editor.encodeMenuX+editor.encodeMenuW-4 && mx <= editor.encodeMenuX+editor.encodeMenuW-2 {
+							editor.menuScrollOffset += pageStep
+							maxOffset := len(editor.encodeMenuItems) - visibleItems
+							if maxOffset < 0 {
+								maxOffset = 0
+							}
+							if editor.menuScrollOffset > maxOffset {
+								editor.menuScrollOffset = maxOffset
+							}
+							needsLayout = true
+							continue
+						}
+					}
+
+					if clickIdx >= 0 && clickIdx < visibleItems {
+						targetItemIdx := editor.menuScrollOffset + clickIdx
+						if targetItemIdx >= 0 && targetItemIdx < len(editor.encodeMenuItems) {
+							if mouseMoved {
+								editor.encodeMenuCursor = targetItemIdx
+								needsLayout = true
+							}
+							if isNewPress {
+								editor.encodeMenuCursor = targetItemIdx
+								action := editor.encodeMenuItems[editor.encodeMenuCursor].Action
+								editor.encodeMenuActive = false
+								editor.encodeMenuState = 0
+								if action != nil {
+									action(editor, currentScreen)
+								}
+								needsLayout = true
+							}
+						}
+					}
+				} else if isNewPress {
+					editor.encodeMenuActive = false
+					editor.encodeMenuState = 0
+					needsLayout = true
+				}
+				continue
+			}
+
+			if !b.searchMode && !b.gotoMode && my == h-1 {
+				if !b.isConfig && mx >= b.encodeBtnX1 && mx <= b.encodeBtnX2 && isNewPress {
+					editor.showEncodeActionMenu(mx, h-6) // 💡 1단계 액션 메뉴 호출
+					needsLayout = true
+					continue
+				}
+			}
+
+			if (b.searchMode || b.gotoMode) && (my == h-1 || (b.isInputSelect && isDrag)) {
+				if my == h-1 && mx >= b.closeBtnStartX && mx <= b.closeBtnEndX && isNewPress {
+					b.searchMode = false
+					b.gotoMode = false
+					b.isReplace = false
+					b.isInputSelect = false
+					needsLayout = true
+					continue
+				}
+
+				if !b.gotoMode && my == h-1 && isNewPress {
+					// 💡 토글 시 재검색 + 가장 가까운 곳으로 즉시 점프하는 함수
+					doSearchJump := func() {
+						b.findAllMatches(editor.cfg.OverlapSearch)
+						if len(b.matches) > 0 {
+							b.matchIdx = b.findInitialMatchIdx(b.cursor, false)
+							b.jumpToMatch()
+							snapToCursor = true // 화면 스크롤 즉시 추적
+						}
+						needsLayout = true
+					}
+
+					if mx >= b.chkRegexX1 && mx <= b.chkRegexX2 {
+						b.searchRegex = !b.searchRegex
+						doSearchJump()
+						continue
+					}
+					if mx >= b.chkCaseX1 && mx <= b.chkCaseX2 {
+						b.searchCase = !b.searchCase
+						doSearchJump()
+						continue
+					}
+					if mx >= b.chkWordX1 && mx <= b.chkWordX2 {
+						b.searchWord = !b.searchWord
+						doSearchJump()
+						continue
+					}
+				}
+				var prefix string
+				var targetStr *[]rune
+				if b.gotoMode {
+					prefix = " [Go To] Line,Col: "
+					targetStr = &b.gotoInput
+				} else if b.isReplace {
+					if b.replaceStep == 1 {
+						prefix = " [Replace] Find: "
+						targetStr = &b.searchQuery
+					} else if b.replaceStep == 2 {
+						prefix = " [Replace] Find: " + string(b.searchQuery) + "  ➔ Replace: "
+						targetStr = &b.replaceQuery
+					}
+				} else {
+					prefix = " [Find] Search: "
+					targetStr = &b.searchQuery
+				}
+
+				if targetStr != nil {
+					prefixW := runewidth.StringWidth(prefix)
+					idx := 0
+					if mx >= prefixW {
+						currW := prefixW
+						for i, r := range *targetStr {
+							rw := runewidth.RuneWidth(r)
+							if mx >= currW && mx < currW+rw {
+								idx = i
+								break
+							}
+							currW += rw
+							idx = i + 1
+						}
+					}
+					if isNewPress && my == h-1 {
+						b.inputCX = idx
+						b.isInputSelect = true
+						b.inputSelStart = idx
+						b.inputSelEnd = idx
+					} else if isDrag && b.isInputSelect {
+						b.inputCX = idx
+						b.inputSelEnd = idx
+						b.isInputSelect = true
+					}
+					needsLayout = true
+				}
+				if my == h-1 || b.isInputSelect {
+					continue
+				}
+			}
+
+			if editor.paletteActive {
+				if mx >= editor.paletteX && mx < editor.paletteX+editor.paletteW && my >= editor.paletteY && my < editor.paletteY+editor.paletteH {
+					_, screenH := currentScreen.Size()
+					pageStep := screenH - 6
+					if pageStep < 5 {
+						pageStep = 5
+					}
+					visibleItems := editor.paletteH - 2
+
+					if isWheel {
+						if buttons&tcell.WheelUp != 0 {
+							editor.menuScrollOffset -= 3
+							if editor.menuScrollOffset < 0 {
+								editor.menuScrollOffset = 0
+							}
+							needsLayout = true
+						} else if buttons&tcell.WheelDown != 0 {
+							editor.menuScrollOffset += 3
+							maxOffset := len(editor.paletteItems) - visibleItems
+							if maxOffset < 0 {
+								maxOffset = 0
+							}
+							if editor.menuScrollOffset > maxOffset {
+								editor.menuScrollOffset = maxOffset
+							}
+							needsLayout = true
+						}
+						continue
+					}
+
+					clickIdx := my - editor.paletteY - 1
+
+					if isNewPress {
+						if my == editor.paletteY && mx >= editor.paletteX+editor.paletteW-4 && mx <= editor.paletteX+editor.paletteW-2 {
+							editor.menuScrollOffset -= pageStep
+							if editor.menuScrollOffset < 0 {
+								editor.menuScrollOffset = 0
+							}
+							needsLayout = true
+							continue
+						}
+						if my == editor.paletteY+editor.paletteH-1 && mx >= editor.paletteX+editor.paletteW-4 && mx <= editor.paletteX+editor.paletteW-2 {
+							editor.menuScrollOffset += pageStep
+							maxOffset := len(editor.paletteItems) - visibleItems
+							if maxOffset < 0 {
+								maxOffset = 0
+							}
+							if editor.menuScrollOffset > maxOffset {
+								editor.menuScrollOffset = maxOffset
+							}
+							needsLayout = true
+							continue
+						}
+					}
+
+					if clickIdx >= 0 && clickIdx < visibleItems {
+						targetItemIdx := editor.menuScrollOffset + clickIdx
+						if targetItemIdx >= 0 && targetItemIdx < len(editor.paletteItems) {
+							if mouseMoved {
+								editor.paletteCursor = targetItemIdx
+								needsLayout = true
+							}
+							if isNewPress {
+								editor.paletteCursor = targetItemIdx
+								action := editor.paletteItems[editor.paletteCursor].Action
+								editor.paletteActive = false
+								if action != nil {
+									action(editor, currentScreen)
+								}
+								needsLayout = true
+							}
+						}
+					}
+				} else if isNewPress {
+					editor.paletteActive = false
+					needsLayout = true
+				}
+				continue
+			}
+
+			if my < editor.tabHeight {
+				if isNewPress {
+					for _, tb := range editor.tabBounds {
+						if my == tb.Y && mx >= tb.StartX && mx < tb.EndX {
+							// 💡 이미 보고 있는 탭을 또 누르면 아예 무시해서 화면 깜빡임 방지
+							if editor.activeBuffer != tb.Idx {
+								editor.activeBuffer = tb.Idx
+								editor.needsFullRefresh = true
+								needsLayout = true
+							}
+							break
+						}
+					}
+					continue
+				}
+				if buttons&tcell.WheelUp != 0 {
+					editor.activeBuffer = (editor.activeBuffer - 1 + len(editor.buffers)) % len(editor.buffers)
+					editor.needsFullRefresh = true
+					needsLayout = true
+					continue
+				}
+				if buttons&tcell.WheelDown != 0 {
+					editor.activeBuffer = (editor.activeBuffer + 1) % len(editor.buffers)
+					editor.needsFullRefresh = true
+					needsLayout = true
+					continue
+				}
+			}
+			outOfBounds := my < editor.tabHeight || my >= h-1
+			if buttons&tcell.WheelUp != 0 {
+				if !outOfBounds {
+					b.vOffsetSub--
+					if b.vOffsetSub < 0 {
+						if b.vOffsetL > 0 {
+							b.vOffsetL--
+							b.ensureVCache(b.vOffsetL, editor.cfg)
+							b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
+						} else {
+							b.vOffsetSub = 0
+						}
+					}
+					needsLayout = true
+				}
+				continue
+			}
+			if buttons&tcell.WheelDown != 0 {
+				if !outOfBounds {
+					b.vOffsetSub++
+					b.ensureVCache(b.vOffsetL, editor.cfg)
+					if b.vOffsetSub >= len(b.vCache[b.vOffsetL]) {
+						if b.vOffsetL+1 < len(b.lines) {
+							b.vOffsetL++
+							b.vOffsetSub = 0
+						} else {
+							b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
+						}
+					}
+					needsLayout = true
+				}
+				continue
+			}
+			if buttons&tcell.Button1 != 0 {
+				isIndicatorEvent := false
+				if !outOfBounds {
+					relativeY := my - editor.tabHeight
+					if relativeY >= 0 {
+						currL := b.vOffsetL
+						currSub := b.vOffsetSub
+						for i := 0; i < relativeY; i++ {
+							b.ensureVCache(currL, editor.cfg)
+							currSub++
+							if currSub >= len(b.vCache[currL]) {
+								currSub = 0
+								currL++
+							}
+							if currL >= len(b.lines) {
+								currL = len(b.lines) - 1
+								b.ensureVCache(currL, editor.cfg)
+								currSub = len(b.vCache[currL]) - 1
 								break
 							}
 						}
-						if !exists || targetIdx == -1 {
-							continue
-						}
 
-						// 💡 우리가 방금 쓴 변경(저장)이면 디스크 재읽기 자체를 건너뜀
-						if info, err := os.Stat(filePath); err == nil {
-							if info.ModTime().Equal(buf.savedModTime) && info.Size() == buf.savedSize {
-								continue
+						if currL < len(b.lines) {
+							b.ensureVCache(currL, editor.cfg)
+							vl := b.vCache[currL][currSub]
+							lineNumWidth := b.getLineNumWidth(editor.cfg)
+							textMaxWidth := w - lineNumWidth
+							if textMaxWidth <= 0 {
+								textMaxWidth = 1
 							}
-						}
 
-						// 💡 수정된 부분: 파일 감지기도 현재 탭의 인코딩을 존중합니다.
-						lines, encoding, incomingChars, incomingHash, incomingEndsWithNL, err := loadFileLines(filePath, buf.encoding)
-						if err == nil {
-							if incomingHash != buf.savedHash || incomingChars != buf.savedTotalChars {
-								if buf.isModified {
-									alreadyQueued := false
-									for _, q := range editor.externalChangeQueue {
-										if q == targetIdx {
-											alreadyQueued = true
-											break
+							vlWidth := vl.width
+
+							leftIndX := lineNumWidth - 1
+							if lineNumWidth <= 0 {
+								leftIndX = 0
+							}
+							if b.hOffset > 0 && vlWidth > 0 && mx <= leftIndX+1 {
+								isIndicatorEvent = true
+								if isNewPress || isDrag {
+									b.hOffset -= 5
+									if b.hOffset < 0 {
+										b.hOffset = 0
+									}
+								}
+							}
+
+							if !isIndicatorEvent {
+								if vlWidth > b.hOffset+textMaxWidth && mx >= w-2 {
+									isIndicatorEvent = true
+									if isNewPress || isDrag {
+										b.hOffset += 5
+										if b.hOffset+textMaxWidth > vlWidth {
+											b.hOffset = vlWidth - textMaxWidth + 1
 										}
 									}
-									if !alreadyQueued {
-										editor.externalChangeQueue = append(editor.externalChangeQueue, targetIdx)
-									}
-									editor.promptMode = true
-									editor.promptType = "external_change"
-									editor.targetCloseBuffer = editor.externalChangeQueue[0]
-									needsLayout = true
-								} else {
-									buf.reloadFromLines(lines, encoding, incomingChars, incomingHash, incomingEndsWithNL)
-									if buf.isConfig {
-										var newCfg Config
-										if err := json.Unmarshal([]byte(buf.getContent()), &newCfg); err == nil {
-											editor.cfg = newCfg
-										}
-									}
-									needsLayout = true
-									snapToCursor = true
-									debug.FreeOSMemory() // 💡 리로드 후 즉각 메모리 반환
 								}
 							}
 						}
 					}
 				}
-				case *tcell.EventMouse:
-					mx, my := ev.Position()
-					mouseMoved := (editor.mouseX != mx || editor.mouseY != my)
-					editor.mouseX = mx
-					editor.mouseY = my
-					buttons := ev.Buttons()
-					isWheel := (buttons&tcell.WheelUp != 0) || (buttons&tcell.WheelDown != 0) || (buttons&tcell.WheelLeft != 0) || (buttons&tcell.WheelRight != 0)
 
-					var isNewPress, isDrag bool
-					if isWheel {
-						isNewPress = false
-						isDrag = (lastMouseButtons&tcell.Button1 != 0)
+				if isIndicatorEvent {
+					needsLayout = true
+					snapToCursor = false
+					continue
+				}
+
+				loc := b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
+				if isNewPress && outOfBounds {
+					continue
+				}
+
+				if isNewPress {
+					now := time.Now()
+					if now.Sub(lastClickTime) < 400*time.Millisecond && mx == lastClickX && my == lastClickY {
+						clickCount++
 					} else {
-						oldButtons := lastMouseButtons
-						lastMouseButtons = buttons
-						isNewPress = (buttons&tcell.Button1 != 0) && (oldButtons&tcell.Button1 == 0)
-						isDrag = (buttons&tcell.Button1 != 0) && !isNewPress
+						clickCount = 1
+					}
+					lastClickTime = now
+					lastClickX, lastClickY = mx, my
+
+					if clickCount == 1 {
+						if !b.isSelecting {
+							b.isSelecting = true
+							b.selection.Start = loc
+						}
+						b.selection.End = loc
+						b.cursor = loc
+					} else if clickCount == 2 {
+						b.cursor = loc
+						b.selectWordAtCursor()
+					} else if clickCount >= 3 {
+						b.cursor = loc
+						b.selectLineAtCursor()
+						clickCount = 0
+					}
+				} else {
+					// 💡 마우스가 완벽히 멈춰있을 때는 더블/트리플 클릭 선택 영역을 취소하지 않음!
+					if mx != lastClickX || my != lastClickY {
+						b.selection.End = loc
+						b.cursor = loc
+					}
+					// 🟢 O(1) 가상라인 역방향 이동
+					if my < editor.tabHeight && (b.vOffsetL > 0 || b.vOffsetSub > 0) {
+						b.vOffsetSub--
+						if b.vOffsetSub < 0 {
+							b.vOffsetL--
+							b.ensureVCache(b.vOffsetL, editor.cfg)
+							b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
+						}
+						// 💡 [추가] 스크롤되어 새로 나타난 맨 윗줄 좌표를 즉시 다시 계산해서 주입!
+						loc = b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
+						b.selection.End = loc
+						b.cursor = loc
+						// 🟢 O(1) 가상라인 순방향 이동
+					} else if my >= h-1 {
+						b.vOffsetSub++
+						b.ensureVCache(b.vOffsetL, editor.cfg)
+						if b.vOffsetSub >= len(b.vCache[b.vOffsetL]) {
+							if b.vOffsetL+1 < len(b.lines) {
+								b.vOffsetL++
+								b.vOffsetSub = 0
+							} else {
+								b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
+							}
+						}
+						// 💡 [추가] 아래쪽도 스크롤 직후 새 줄 좌표를 즉시 동기화!
+						loc = b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
+						b.selection.End = loc
+						b.cursor = loc
+					}
+				}
+				snapToCursor = true
+			} else {
+				if b.isSelecting {
+					b.isSelecting = false
+					if b.selection.Start == b.selection.End {
+						b.clearSelection()
+					}
+				}
+			}
+		case *tcell.EventKey:
+			isCtrl := (ev.Modifiers() & tcell.ModCtrl) != 0
+			isShift := (ev.Modifiers() & tcell.ModShift) != 0
+			isAlt := (ev.Modifiers() & tcell.ModAlt) != 0
+			snapToCursor = true
+
+			if ev.Key() != tcell.KeyEnd {
+				b.stickToWrapEnd = false
+			}
+
+			// 💡 탭 좌우 이동 시 화면 렌더링 캐시 동기화
+			if isAlt && ev.Rune() == ',' {
+				editor.activeBuffer = (editor.activeBuffer - 1 + len(editor.buffers)) % len(editor.buffers)
+				editor.needsFullRefresh = true
+				needsLayout = true
+				snapToCursor = false // 💡 탭 전환 시 화면 점프 방지
+				continue
+			}
+			if isAlt && ev.Rune() == '.' {
+				editor.activeBuffer = (editor.activeBuffer + 1) % len(editor.buffers)
+				editor.needsFullRefresh = true
+				needsLayout = true
+				snapToCursor = false // 💡 탭 전환 시 화면 점프 방지
+				continue
+			}
+
+			if editor.promptMode {
+				snapToCursor = false // 💡 프롬프트 입력 및 취소 시 화면 점프 방지
+				// 💡 Alert 모드일 때는 y/n이 아니라 Enter나 Esc로 단순히 닫음
+				if editor.promptType == "alert" {
+					if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyEnter {
+						editor.promptMode = false
+						needsLayout = true
+					}
+					continue
+				}
+
+				if ev.Key() == tcell.KeyEscape || ev.Rune() == 'n' || ev.Rune() == 'N' {
+					editor.promptMode = false
+					if editor.promptType == "external_change" && len(editor.externalChangeQueue) > 0 {
+						editor.externalChangeQueue = editor.externalChangeQueue[1:]
+						if len(editor.externalChangeQueue) > 0 {
+							editor.promptMode = true
+							editor.targetCloseBuffer = editor.externalChangeQueue[0]
+						}
+					}
+					needsLayout = true
+				} else if ev.Rune() == 'y' || ev.Rune() == 'Y' {
+					editor.promptMode = false
+
+					// 💡 큐를 진행하기 전에 현재 타겟 탭을 캡처합니다.
+					target := editor.targetCloseBuffer
+					isValidTarget := target >= 0 && target < len(editor.buffers)
+
+					// advance queue
+					if editor.promptType == "external_change" && len(editor.externalChangeQueue) > 0 {
+						editor.externalChangeQueue = editor.externalChangeQueue[1:]
+						if len(editor.externalChangeQueue) > 0 {
+							editor.promptMode = true
+							editor.targetCloseBuffer = editor.externalChangeQueue[0] // next prompt
+						}
 					}
 
-					if (buttons&tcell.Button3 != 0 || buttons&tcell.Button2 != 0) && !editor.paletteActive {
-						editor.ctxMenuActive = true
-						editor.ctxMenuX = mx
-						editor.ctxMenuY = my
+					if editor.promptType == "quit" {
+						shuttingDown.Store(true)
+						currentScreen.Fini()
+						os.Exit(0)
+					} else if editor.promptType == "close" {
+						if !isValidTarget {
+							continue
+						}
+						if len(editor.buffers) <= 1 {
+							shuttingDown.Store(true)
+							currentScreen.Fini()
+							os.Exit(0)
+						}
+						editor.closeBuffer(target)
+						editor.needsFullRefresh = true
+						needsLayout = true
+					} else if editor.promptType == "reset_config" {
+						defaultCfg := DefaultConfig()
+						data, _ := json.MarshalIndent(defaultCfg, "", "    ")
+						_ = os.WriteFile(getConfigPath(), data, 0644)
+						editor.cfg = defaultCfg
+						for _, buf := range editor.buffers {
+							if buf.isConfig {
+								buf.isModified = false
+								buf.reloadFromDisk()
+							}
+						}
+						editor.needsFullRefresh = true
+						needsLayout = true
+					} else if editor.promptType == "reopen" {
+						editor.getActive().reopenWithEncoding(editor.targetEncoding)
+						editor.needsFullRefresh = true
+						needsLayout = true
+					} else if editor.promptType == "close_config" {
+						if !isValidTarget {
+							continue
+						}
+						editor.closeBuffer(target)
+						editor.activeBuffer = 0
+						editor.needsFullRefresh = true
+						needsLayout = true
+					} else if editor.promptType == "external_change" {
+						if !isValidTarget {
+							continue
+						}
+						bufToReload := editor.buffers[target]
+						bufToReload.isModified = false
+						if bufToReload.reloadFromDisk() {
+							if bufToReload.isConfig {
+								var newCfg Config
+								if err := json.Unmarshal([]byte(bufToReload.getContent()), &newCfg); err == nil {
+									editor.cfg = newCfg
+								}
+							}
+						}
+						editor.needsFullRefresh = true
+						needsLayout = true
+						snapToCursor = true
+					}
+				}
+				continue
+			}
+
+			if editor.paletteActive {
+				snapToCursor = false // 💡 팔레트 조작 및 종료 시 화면 점프 방지
+				_, screenH := currentScreen.Size()
+				pageStep := screenH - 6
+				if pageStep < 5 {
+					pageStep = 5
+				}
+
+				switch ev.Key() {
+				case tcell.KeyEscape:
+					editor.paletteActive = false
+				case tcell.KeyUp:
+					editor.paletteCursor--
+					if editor.paletteCursor < 0 {
+						editor.paletteCursor = len(editor.paletteItems) - 1
+					}
+				case tcell.KeyDown:
+					editor.paletteCursor++
+					if editor.paletteCursor >= len(editor.paletteItems) {
+						editor.paletteCursor = 0
+					}
+				case tcell.KeyPgUp:
+					editor.paletteCursor -= pageStep
+					if editor.paletteCursor < 0 {
+						editor.paletteCursor = 0
+					}
+				case tcell.KeyPgDn:
+					editor.paletteCursor += pageStep
+					if editor.paletteCursor >= len(editor.paletteItems) {
+						editor.paletteCursor = len(editor.paletteItems) - 1
+					}
+				case tcell.KeyEnter:
+					action := editor.paletteItems[editor.paletteCursor].Action
+					editor.paletteActive = false
+					if action != nil {
+						action(editor, currentScreen)
+					}
+				case tcell.KeyRune:
+					if idx := getMenuJumpIdx(editor.paletteItems, ev.Rune(), editor.paletteCursor); idx != -1 {
+						editor.paletteCursor = idx
+					}
+				}
+
+				// 💡 자동 스크롤 추적 보정
+				visibleItems := editor.paletteH - 2
+				if visibleItems > 0 {
+					if editor.paletteCursor < editor.menuScrollOffset {
+						editor.menuScrollOffset = editor.paletteCursor
+					} else if editor.paletteCursor >= editor.menuScrollOffset+visibleItems {
+						editor.menuScrollOffset = editor.paletteCursor - visibleItems + 1
+					}
+				}
+				needsLayout = true
+				continue
+			}
+
+			if editor.ctxMenuActive {
+				snapToCursor = false // 💡 컨텍스트 메뉴 조작 및 종료 시 화면 점프 방지
+				_, screenH := currentScreen.Size()
+				pageStep := screenH - 6
+				if pageStep < 5 {
+					pageStep = 5
+				}
+
+				switch ev.Key() {
+				case tcell.KeyEscape:
+					editor.ctxMenuActive = false
+				case tcell.KeyUp:
+					editor.ctxMenuCursor--
+					if editor.ctxMenuCursor < 0 {
+						editor.ctxMenuCursor = len(editor.ctxMenuItems) - 1
+					}
+				case tcell.KeyDown:
+					editor.ctxMenuCursor++
+					if editor.ctxMenuCursor >= len(editor.ctxMenuItems) {
 						editor.ctxMenuCursor = 0
-						editor.paletteActive = false
-						editor.encodeMenuActive = false
+					}
+				case tcell.KeyPgUp:
+					editor.ctxMenuCursor -= pageStep
+					if editor.ctxMenuCursor < 0 {
+						editor.ctxMenuCursor = 0
+					}
+				case tcell.KeyPgDn:
+					editor.ctxMenuCursor += pageStep
+					if editor.ctxMenuCursor >= len(editor.ctxMenuItems) {
+						editor.ctxMenuCursor = len(editor.ctxMenuItems) - 1
+					}
+				case tcell.KeyEnter:
+					action := editor.ctxMenuItems[editor.ctxMenuCursor].Action
+					editor.ctxMenuActive = false
+					if action != nil {
+						action(editor, currentScreen)
+					}
+				case tcell.KeyRune:
+					if idx := getMenuJumpIdx(editor.ctxMenuItems, ev.Rune(), editor.ctxMenuCursor); idx != -1 {
+						editor.ctxMenuCursor = idx
+					}
+				}
+
+				// 💡 자동 스크롤 추적 보정
+				visibleItems := editor.ctxMenuH - 2
+				if visibleItems > 0 {
+					if editor.ctxMenuCursor < editor.menuScrollOffset {
+						editor.menuScrollOffset = editor.ctxMenuCursor
+					} else if editor.ctxMenuCursor >= editor.menuScrollOffset+visibleItems {
+						editor.menuScrollOffset = editor.ctxMenuCursor - visibleItems + 1
+					}
+				}
+				needsLayout = true
+				continue
+			}
+
+			if editor.encodeMenuActive {
+				snapToCursor = false // 💡 인코딩 메뉴 조작 및 종료 시 화면 점프 방지
+				_, screenH := currentScreen.Size()
+				pageStep := screenH - 6
+				if pageStep < 5 {
+					pageStep = 5
+				}
+
+				switch ev.Key() {
+				case tcell.KeyEscape:
+					editor.encodeMenuActive = false
+					editor.encodeMenuState = 0
+				case tcell.KeyUp:
+					editor.encodeMenuCursor--
+					if editor.encodeMenuCursor < 0 {
+						editor.encodeMenuCursor = len(editor.encodeMenuItems) - 1
+					}
+				case tcell.KeyDown:
+					editor.encodeMenuCursor++
+					if editor.encodeMenuCursor >= len(editor.encodeMenuItems) {
+						editor.encodeMenuCursor = 0
+					}
+				case tcell.KeyPgUp:
+					editor.encodeMenuCursor -= pageStep
+					if editor.encodeMenuCursor < 0 {
+						editor.encodeMenuCursor = 0
+					}
+				case tcell.KeyPgDn:
+					editor.encodeMenuCursor += pageStep
+					if editor.encodeMenuCursor >= len(editor.encodeMenuItems) {
+						editor.encodeMenuCursor = len(editor.encodeMenuItems) - 1
+					}
+				case tcell.KeyEnter:
+					action := editor.encodeMenuItems[editor.encodeMenuCursor].Action
+					editor.encodeMenuActive = false
+					editor.encodeMenuState = 0
+					if action != nil {
+						action(editor, currentScreen)
+					}
+				case tcell.KeyRune:
+					if idx := getMenuJumpIdx(editor.encodeMenuItems, ev.Rune(), editor.encodeMenuCursor); idx != -1 {
+						editor.encodeMenuCursor = idx
+					}
+				}
+
+				// 💡 자동 스크롤 추적 보정
+				visibleItems := editor.encodeMenuH - 2
+				if visibleItems > 0 {
+					if editor.encodeMenuCursor < editor.menuScrollOffset {
+						editor.menuScrollOffset = editor.encodeMenuCursor
+					} else if editor.encodeMenuCursor >= editor.menuScrollOffset+visibleItems {
+						editor.menuScrollOffset = editor.encodeMenuCursor - visibleItems + 1
+					}
+				}
+				needsLayout = true
+				continue
+			}
+
+			if b.searchMode || b.gotoMode {
+				snapToCursor = false // 💡 검색/이동 모드 입력 및 취소 시 화면 점프 방지 (단, 매치 이동 시에는 명시적으로 true 설정됨)
+				if ev.Key() == tcell.KeyEscape {
+					b.searchMode = false
+					b.isReplace = false
+					b.replaceStep = 0
+					b.gotoMode = false
+					b.clearSelection()
+					b.isInputSelect = false
+					needsLayout = true
+					continue
+				}
+
+				var targetStr *[]rune
+				if b.gotoMode {
+					targetStr = &b.gotoInput
+				} else if b.isReplace && b.replaceStep == 1 {
+					targetStr = &b.searchQuery
+				} else if b.isReplace && b.replaceStep == 2 {
+					targetStr = &b.replaceQuery
+				} else if !b.isReplace {
+					targetStr = &b.searchQuery
+				}
+
+				if targetStr != nil {
+					hasSel := b.isInputSelect && b.inputSelStart != b.inputSelEnd
+					selStart, selEnd := b.inputSelStart, b.inputSelEnd
+					if selStart > selEnd {
+						selStart, selEnd = selEnd, selStart
+					}
+
+					deleteInputSel := func() {
+						if hasSel {
+							*targetStr = append((*targetStr)[:selStart], (*targetStr)[selEnd:]...)
+							b.inputCX = selStart
+							b.isInputSelect = false
+							b.inputSelStart = 0
+							b.inputSelEnd = 0
+						}
+					}
+
+					if ev.Key() == tcell.KeyCtrlA {
+						b.isInputSelect = true
+						b.inputSelStart = 0
+						b.inputSelEnd = len(*targetStr)
+						b.inputCX = len(*targetStr)
+						needsLayout = true
+						continue
+					}
+					if ev.Key() == tcell.KeyCtrlC && hasSel {
+						clipboard.WriteAll(string((*targetStr)[selStart:selEnd]))
+						continue
+					}
+					if ev.Key() == tcell.KeyCtrlX && hasSel {
+						clipboard.WriteAll(string((*targetStr)[selStart:selEnd]))
+						deleteInputSel()
+						if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
+							b.matches = nil
+							b.matchIdx = -1
+						}
+						needsLayout = true
+						continue
+					}
+					if ev.Key() == tcell.KeyCtrlV {
+						text, err := clipboard.ReadAll()
+						if err == nil && text != "" {
+							deleteInputSel()
+							text = strings.ReplaceAll(text, "\r\n", " ")
+							text = strings.ReplaceAll(text, "\n", " ")
+							text = strings.ReplaceAll(text, "\r", "")
+							runes := []rune(text)
+							*targetStr = append((*targetStr)[:b.inputCX], append(runes, (*targetStr)[b.inputCX:]...)...)
+							b.inputCX += len(runes)
+							if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
+								b.matches = nil
+								b.matchIdx = -1
+							}
+							needsLayout = true
+						}
+						continue
+					}
+
+					if ev.Key() == tcell.KeyLeft {
+						if !isShift && hasSel {
+							b.isInputSelect = false
+							b.inputCX = selStart
+						} else {
+							if b.inputCX > 0 {
+								b.inputCX--
+							}
+							if isShift {
+								if !b.isInputSelect {
+									b.isInputSelect = true
+									b.inputSelStart = b.inputCX + 1
+								}
+								b.inputSelEnd = b.inputCX
+							} else {
+								b.isInputSelect = false
+							}
+						}
+						needsLayout = true
+						continue
+					}
+					if ev.Key() == tcell.KeyRight {
+						if !isShift && hasSel {
+							b.isInputSelect = false
+							b.inputCX = selEnd
+						} else {
+							if b.inputCX < len(*targetStr) {
+								b.inputCX++
+							}
+							if isShift {
+								if !b.isInputSelect {
+									b.isInputSelect = true
+									b.inputSelStart = b.inputCX - 1
+								}
+								b.inputSelEnd = b.inputCX
+							} else {
+								b.isInputSelect = false
+							}
+						}
+						needsLayout = true
+						continue
+					}
+					if ev.Key() == tcell.KeyHome {
+						if !isShift && hasSel {
+							b.isInputSelect = false
+						}
+						if isShift {
+							if !b.isInputSelect {
+								b.isInputSelect = true
+								b.inputSelStart = b.inputCX
+							}
+							b.inputCX = 0
+							b.inputSelEnd = 0
+						} else {
+							b.inputCX = 0
+							b.isInputSelect = false
+						}
+						needsLayout = true
+						continue
+					}
+					if ev.Key() == tcell.KeyEnd {
+						if !isShift && hasSel {
+							b.isInputSelect = false
+						}
+						if isShift {
+							if !b.isInputSelect {
+								b.isInputSelect = true
+								b.inputSelStart = b.inputCX
+							}
+							b.inputCX = len(*targetStr)
+							b.inputSelEnd = b.inputCX
+						} else {
+							b.inputCX = len(*targetStr)
+							b.isInputSelect = false
+						}
 						needsLayout = true
 						continue
 					}
 
-					if editor.ctxMenuActive {
-						if mx >= editor.ctxMenuX && mx < editor.ctxMenuX+editor.ctxMenuW && my >= editor.ctxMenuY && my < editor.ctxMenuY+editor.ctxMenuH {
-							_, screenH := currentScreen.Size()
-							pageStep := screenH - 6
-							if pageStep < 5 {
-								pageStep = 5
+					if ev.Key() == tcell.KeyBackspace || ev.Key() == tcell.KeyBackspace2 {
+						if hasSel {
+							deleteInputSel()
+							if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
+								b.matches = nil
+								b.matchIdx = -1
 							}
-							visibleItems := editor.ctxMenuH - 2
-
-							if isWheel {
-								if buttons&tcell.WheelUp != 0 {
-									editor.menuScrollOffset -= 3
-									if editor.menuScrollOffset < 0 {
-										editor.menuScrollOffset = 0
-									}
-									needsLayout = true
-								} else if buttons&tcell.WheelDown != 0 {
-									editor.menuScrollOffset += 3
-									maxOffset := len(editor.ctxMenuItems) - visibleItems
-									if maxOffset < 0 {
-										maxOffset = 0
-									}
-									if editor.menuScrollOffset > maxOffset {
-										editor.menuScrollOffset = maxOffset
-									}
-									needsLayout = true
-								}
-								continue
-							}
-
-							clickIdx := my - editor.ctxMenuY - 1
-
-							if isNewPress {
-								if my == editor.ctxMenuY && mx >= editor.ctxMenuX+editor.ctxMenuW-4 && mx <= editor.ctxMenuX+editor.ctxMenuW-2 {
-									editor.menuScrollOffset -= pageStep
-									if editor.menuScrollOffset < 0 {
-										editor.menuScrollOffset = 0
-									}
-									needsLayout = true
-									continue
-								}
-								if my == editor.ctxMenuY+editor.ctxMenuH-1 && mx >= editor.ctxMenuX+editor.ctxMenuW-4 && mx <= editor.ctxMenuX+editor.ctxMenuW-2 {
-									editor.menuScrollOffset += pageStep
-									maxOffset := len(editor.ctxMenuItems) - visibleItems
-									if maxOffset < 0 {
-										maxOffset = 0
-									}
-									if editor.menuScrollOffset > maxOffset {
-										editor.menuScrollOffset = maxOffset
-									}
-									needsLayout = true
-									continue
-								}
-							}
-
-							if clickIdx >= 0 && clickIdx < visibleItems {
-								targetItemIdx := editor.menuScrollOffset + clickIdx
-								if targetItemIdx >= 0 && targetItemIdx < len(editor.ctxMenuItems) {
-									if mouseMoved {
-										editor.ctxMenuCursor = targetItemIdx
-										needsLayout = true
-									}
-									if isNewPress {
-										editor.ctxMenuCursor = targetItemIdx
-										action := editor.ctxMenuItems[editor.ctxMenuCursor].Action
-										editor.ctxMenuActive = false
-										if action != nil {
-											action(editor, currentScreen)
-										}
-										needsLayout = true
-									}
-								}
-							}
-						} else if isNewPress {
-							editor.ctxMenuActive = false
 							needsLayout = true
-						}
-						continue
-					}
-
-					if editor.encodeMenuActive {
-						if mx >= editor.encodeMenuX && mx < editor.encodeMenuX+editor.encodeMenuW && my >= editor.encodeMenuY && my < editor.encodeMenuY+editor.encodeMenuH {
-							_, screenH := currentScreen.Size()
-							pageStep := screenH - 6
-							if pageStep < 5 {
-								pageStep = 5
+						} else if b.inputCX > 0 {
+							*targetStr = append((*targetStr)[:b.inputCX-1], (*targetStr)[b.inputCX:]...)
+							b.inputCX--
+							if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
+								b.matches = nil
+								b.matchIdx = -1
 							}
-							visibleItems := editor.encodeMenuH - 2
-
-							if isWheel {
-								if buttons&tcell.WheelUp != 0 {
-									editor.menuScrollOffset -= 3
-									if editor.menuScrollOffset < 0 {
-										editor.menuScrollOffset = 0
-									}
-									needsLayout = true
-								} else if buttons&tcell.WheelDown != 0 {
-									editor.menuScrollOffset += 3
-									maxOffset := len(editor.encodeMenuItems) - visibleItems
-									if maxOffset < 0 {
-										maxOffset = 0
-									}
-									if editor.menuScrollOffset > maxOffset {
-										editor.menuScrollOffset = maxOffset
-									}
-									needsLayout = true
-								}
-								continue
-							}
-
-							clickIdx := my - editor.encodeMenuY - 1
-
-							if isNewPress {
-								if my == editor.encodeMenuY && mx >= editor.encodeMenuX+editor.encodeMenuW-4 && mx <= editor.encodeMenuX+editor.encodeMenuW-2 {
-									editor.menuScrollOffset -= pageStep
-									if editor.menuScrollOffset < 0 {
-										editor.menuScrollOffset = 0
-									}
-									needsLayout = true
-									continue
-								}
-								if my == editor.encodeMenuY+editor.encodeMenuH-1 && mx >= editor.encodeMenuX+editor.encodeMenuW-4 && mx <= editor.encodeMenuX+editor.encodeMenuW-2 {
-									editor.menuScrollOffset += pageStep
-									maxOffset := len(editor.encodeMenuItems) - visibleItems
-									if maxOffset < 0 {
-										maxOffset = 0
-									}
-									if editor.menuScrollOffset > maxOffset {
-										editor.menuScrollOffset = maxOffset
-									}
-									needsLayout = true
-									continue
-								}
-							}
-
-							if clickIdx >= 0 && clickIdx < visibleItems {
-								targetItemIdx := editor.menuScrollOffset + clickIdx
-								if targetItemIdx >= 0 && targetItemIdx < len(editor.encodeMenuItems) {
-									if mouseMoved {
-										editor.encodeMenuCursor = targetItemIdx
-										needsLayout = true
-									}
-									if isNewPress {
-										editor.encodeMenuCursor = targetItemIdx
-										action := editor.encodeMenuItems[editor.encodeMenuCursor].Action
-										editor.encodeMenuActive = false
-										editor.encodeMenuState = 0
-										if action != nil {
-											action(editor, currentScreen)
-										}
-										needsLayout = true
-									}
-								}
-							}
-						} else if isNewPress {
-							editor.encodeMenuActive = false
-							editor.encodeMenuState = 0
 							needsLayout = true
-						}
-						continue
-					}
-
-					if !b.searchMode && !b.gotoMode && my == h-1 {
-						if !b.isConfig && mx >= b.encodeBtnX1 && mx <= b.encodeBtnX2 && isNewPress {
-							editor.showEncodeActionMenu(mx, h-6) // 💡 1단계 액션 메뉴 호출
-							needsLayout = true
-							continue
-						}
-					}
-
-					if (b.searchMode || b.gotoMode) && (my == h-1 || (b.isInputSelect && isDrag)) {
-						if my == h-1 && mx >= b.closeBtnStartX && mx <= b.closeBtnEndX && isNewPress {
-							b.searchMode = false
-							b.gotoMode = false
-							b.isReplace = false
+						} else if b.inputCX == 0 && b.isReplace && b.replaceStep == 2 {
+							b.replaceStep = 1
+							b.inputCX = len(b.searchQuery)
 							b.isInputSelect = false
 							needsLayout = true
-							continue
 						}
-
-						if !b.gotoMode && my == h-1 && isNewPress {
-							// 💡 토글 시 재검색 + 가장 가까운 곳으로 즉시 점프하는 함수
-							doSearchJump := func() {
-								b.findAllMatches(editor.cfg.OverlapSearch)
-								if len(b.matches) > 0 {
-									b.matchIdx = b.findInitialMatchIdx(b.cursor, false)
-									b.jumpToMatch()
-									snapToCursor = true // 화면 스크롤 즉시 추적
-								}
-								needsLayout = true
+						continue
+					}
+					if ev.Key() == tcell.KeyDelete {
+						if hasSel {
+							deleteInputSel()
+							if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
+								b.matches = nil
+								b.matchIdx = -1
 							}
-
-							if mx >= b.chkRegexX1 && mx <= b.chkRegexX2 {
-								b.searchRegex = !b.searchRegex
-								doSearchJump()
-								continue
-							}
-							if mx >= b.chkCaseX1 && mx <= b.chkCaseX2 {
-								b.searchCase = !b.searchCase
-								doSearchJump()
-								continue
-							}
-							if mx >= b.chkWordX1 && mx <= b.chkWordX2 {
-								b.searchWord = !b.searchWord
-								doSearchJump()
-								continue
-							}
-						}
-						var prefix string
-						var targetStr *[]rune
-						if b.gotoMode {
-							prefix = " [Go To] Line,Col: "
-							targetStr = &b.gotoInput
-						} else if b.isReplace {
-							if b.replaceStep == 1 {
-								prefix = " [Replace] Find: "
-								targetStr = &b.searchQuery
-							} else if b.replaceStep == 2 {
-								prefix = " [Replace] Find: " + string(b.searchQuery) + "  ➔ Replace: "
-								targetStr = &b.replaceQuery
-							}
-						} else {
-							prefix = " [Find] Search: "
-							targetStr = &b.searchQuery
-						}
-
-						if targetStr != nil {
-							prefixW := runewidth.StringWidth(prefix)
-							idx := 0
-							if mx >= prefixW {
-								currW := prefixW
-								for i, r := range *targetStr {
-									rw := runewidth.RuneWidth(r)
-									if mx >= currW && mx < currW+rw {
-										idx = i
-										break
-									}
-									currW += rw
-									idx = i + 1
-								}
-							}
-							if isNewPress && my == h-1 {
-								b.inputCX = idx
-								b.isInputSelect = true
-								b.inputSelStart = idx
-								b.inputSelEnd = idx
-							} else if isDrag && b.isInputSelect {
-								b.inputCX = idx
-								b.inputSelEnd = idx
-								b.isInputSelect = true
+							needsLayout = true
+						} else if b.inputCX < len(*targetStr) {
+							*targetStr = append((*targetStr)[:b.inputCX], (*targetStr)[b.inputCX+1:]...)
+							if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
+								b.matches = nil
+								b.matchIdx = -1
 							}
 							needsLayout = true
 						}
-						if my == h-1 || b.isInputSelect {
-							continue
-						}
+						continue
 					}
+					if ev.Key() == tcell.KeyRune && ev.Rune() != 0 {
+						deleteInputSel()
+						*targetStr = append((*targetStr)[:b.inputCX], append([]rune{ev.Rune()}, (*targetStr)[b.inputCX:]...)...)
+						b.inputCX++
+						if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
+							b.matches = nil
+							b.matchIdx = -1
+						}
+						needsLayout = true
+						continue
+					}
+				}
 
-					if editor.paletteActive {
-						if mx >= editor.paletteX && mx < editor.paletteX+editor.paletteW && my >= editor.paletteY && my < editor.paletteY+editor.paletteH {
-							_, screenH := currentScreen.Size()
-							pageStep := screenH - 6
-							if pageStep < 5 {
-								pageStep = 5
+				if b.searchMode {
+					if ev.Key() == tcell.KeyCtrlA && b.isReplace && b.replaceStep == 3 {
+						if len(b.searchQuery) > 0 && len(b.matches) > 0 {
+							b.BeginTransaction()
+							for i := len(b.matches) - 1; i >= 0; i-- {
+								m := b.matches[i]
+								b.DeleteTextWithRecord(m.loc, Loc{m.loc.L, m.loc.C + m.matchLen})
+								b.InsertTextWithRecord(m.loc, string(b.replaceQuery))
 							}
-							visibleItems := editor.paletteH - 2
-
-							if isWheel {
-								if buttons&tcell.WheelUp != 0 {
-									editor.menuScrollOffset -= 3
-									if editor.menuScrollOffset < 0 {
-										editor.menuScrollOffset = 0
-									}
-									needsLayout = true
-								} else if buttons&tcell.WheelDown != 0 {
-									editor.menuScrollOffset += 3
-									maxOffset := len(editor.paletteItems) - visibleItems
-									if maxOffset < 0 {
-										maxOffset = 0
-									}
-									if editor.menuScrollOffset > maxOffset {
-										editor.menuScrollOffset = maxOffset
-									}
-									needsLayout = true
-								}
-								continue
-							}
-
-							clickIdx := my - editor.paletteY - 1
-
-							if isNewPress {
-								if my == editor.paletteY && mx >= editor.paletteX+editor.paletteW-4 && mx <= editor.paletteX+editor.paletteW-2 {
-									editor.menuScrollOffset -= pageStep
-									if editor.menuScrollOffset < 0 {
-										editor.menuScrollOffset = 0
-									}
-									needsLayout = true
-									continue
-								}
-								if my == editor.paletteY+editor.paletteH-1 && mx >= editor.paletteX+editor.paletteW-4 && mx <= editor.paletteX+editor.paletteW-2 {
-									editor.menuScrollOffset += pageStep
-									maxOffset := len(editor.paletteItems) - visibleItems
-									if maxOffset < 0 {
-										maxOffset = 0
-									}
-									if editor.menuScrollOffset > maxOffset {
-										editor.menuScrollOffset = maxOffset
-									}
-									needsLayout = true
-									continue
-								}
-							}
-
-							if clickIdx >= 0 && clickIdx < visibleItems {
-								targetItemIdx := editor.menuScrollOffset + clickIdx
-								if targetItemIdx >= 0 && targetItemIdx < len(editor.paletteItems) {
-									if mouseMoved {
-										editor.paletteCursor = targetItemIdx
-										needsLayout = true
-									}
-									if isNewPress {
-										editor.paletteCursor = targetItemIdx
-										action := editor.paletteItems[editor.paletteCursor].Action
-										editor.paletteActive = false
-										if action != nil {
-											action(editor, currentScreen)
-										}
-										needsLayout = true
-									}
-								}
-							}
-						} else if isNewPress {
-							editor.paletteActive = false
+							b.EndTransaction()
+							b.searchMode = false
+							b.isReplace = false
+							b.replaceStep = 0
+							b.clearSelection()
 							needsLayout = true
 						}
 						continue
 					}
 
-					if my < editor.tabHeight {
-						if isNewPress {
-							for _, tb := range editor.tabBounds {
-								if my == tb.Y && mx >= tb.StartX && mx < tb.EndX {
-									// 💡 이미 보고 있는 탭을 또 누르면 아예 무시해서 화면 깜빡임 방지
-									if editor.activeBuffer != tb.Idx {
-										editor.activeBuffer = tb.Idx
-										editor.needsFullRefresh = true
-										needsLayout = true
+					if ev.Key() == tcell.KeyUp {
+						if len(b.matches) > 0 {
+							b.matchIdx = (b.matchIdx - 1 + len(b.matches)) % len(b.matches)
+							b.jumpToMatch()
+							snapToCursor = true
+						}
+						continue
+					}
+					if ev.Key() == tcell.KeyDown {
+						if len(b.matches) > 0 {
+							b.matchIdx = (b.matchIdx + 1) % len(b.matches)
+							b.jumpToMatch()
+							snapToCursor = true
+						}
+						continue
+					}
+					if ev.Key() == tcell.KeyEnter {
+						if b.searchMode && (!b.isReplace || b.replaceStep == 1) && b.matchIdx == -1 {
+							b.findAllMatches(editor.cfg.OverlapSearch)
+							if len(b.matches) > 0 {
+								b.matchIdx = b.findInitialMatchIdx(b.cursor, isShift)
+								b.jumpToMatch()
+								snapToCursor = true
+							}
+							if b.isReplace && b.replaceStep == 1 {
+								b.replaceStep = 2
+								b.inputCX = len(b.replaceQuery)
+								b.isInputSelect = false
+							}
+						} else if isShift {
+							if len(b.matches) > 0 {
+								b.matchIdx = (b.matchIdx - 1 + len(b.matches)) % len(b.matches)
+								b.jumpToMatch()
+								snapToCursor = true
+							}
+						} else {
+							if b.isReplace {
+								if b.replaceStep == 1 {
+									b.replaceStep = 2
+									b.inputCX = len(b.replaceQuery)
+									b.isInputSelect = false
+									if len(b.matches) > 0 {
+										b.matchIdx = b.findInitialMatchIdx(b.cursor, false)
+										b.jumpToMatch()
+										snapToCursor = true
 									}
+								} else if b.replaceStep == 2 {
+									b.replaceStep = 3
+									b.findAllMatches(editor.cfg.OverlapSearch)
+									if len(b.matches) > 0 {
+										b.matchIdx = b.findInitialMatchIdx(b.cursor, false)
+										b.jumpToMatch()
+										snapToCursor = true
+									}
+								} else if b.replaceStep == 3 {
+									b.replaceCurrent(editor.cfg.OverlapSearch)
+									needsLayout = true
+									snapToCursor = true
+								}
+							} else {
+								if len(b.matches) > 0 {
+									b.matchIdx = (b.matchIdx + 1) % len(b.matches)
+									b.jumpToMatch()
+									snapToCursor = true
+								}
+							}
+						}
+						continue
+					}
+				}
+
+				if b.gotoMode {
+					if ev.Key() == tcell.KeyEnter {
+						inputStr := string(b.gotoInput)
+						parts := strings.Split(inputStr, ",")
+						lineNum, colNum := 0, 0
+						fmt.Sscanf(strings.TrimSpace(parts[0]), "%d", &lineNum)
+						if len(parts) > 1 {
+							fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &colNum)
+						}
+						if lineNum > 0 {
+							lineNum--
+							if lineNum >= len(b.lines) {
+								lineNum = len(b.lines) - 1
+							}
+							b.cursor.L = lineNum
+							targetRuneIdx := colNum - 1
+							if targetRuneIdx <= 0 {
+								b.cursor.C = 0
+							} else {
+								byteOffset := 0
+								lineData := b.lines[b.cursor.L]
+								runeCount := 0
+								for byteOffset < len(lineData) && runeCount < targetRuneIdx {
+									_, size := utf8.DecodeRune(lineData[byteOffset:])
+									byteOffset += size
+									runeCount++
+								}
+								b.cursor.C = byteOffset
+							}
+						}
+						b.gotoMode = false
+						snapToCursor = true
+						needsLayout = true
+						continue
+					}
+				}
+				continue
+			}
+			// 💡 [여기가 올바른 위치!] 읽기 전용 탭의 텍스트 수정 원천 차단
+			if b.isReadOnly {
+				k := ev.Key()
+				if k == tcell.KeyRune || k == tcell.KeyEnter || k == tcell.KeyBackspace || k == tcell.KeyBackspace2 || k == tcell.KeyDelete || k == tcell.KeyTab {
+					continue
+				}
+				if isAlt && (k == tcell.KeyUp || k == tcell.KeyDown) { // 줄 이동 단축키 차단
+					continue
+				}
+			}
+
+			if isAlt && ev.Key() == tcell.KeyUp {
+				if b.cursor.L > 0 {
+					oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
+					b.BeginTransaction()
+					currStr := string(b.lines[oldL])
+					prevStr := string(b.lines[oldL-1])
+					b.DeleteTextWithRecord(Loc{oldL - 1, 0}, Loc{oldL, len(b.lines[oldL])})
+					b.InsertTextWithRecord(Loc{oldL - 1, 0}, currStr+"\n"+prevStr)
+					b.cursor = b.clampLoc(Loc{oldL - 1, oldC}) // 💡 절대 에러 방지
+					b.EndTransaction()
+					needsLayout = true
+				}
+				continue
+			}
+			if isAlt && ev.Key() == tcell.KeyDown {
+				if b.cursor.L < len(b.lines)-1 {
+					oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
+					b.BeginTransaction()
+					currStr := string(b.lines[oldL])
+					nextStr := string(b.lines[oldL+1])
+					b.DeleteTextWithRecord(Loc{oldL, 0}, Loc{oldL + 1, len(b.lines[oldL+1])})
+					b.InsertTextWithRecord(Loc{oldL, 0}, nextStr+"\n"+currStr)
+					b.cursor = b.clampLoc(Loc{oldL + 1, oldC}) // 💡 절대 에러 방지
+					b.EndTransaction()
+					needsLayout = true
+				}
+				continue
+			}
+			if ev.Key() == tcell.KeyLeft || ev.Key() == tcell.KeyRight || ev.Key() == tcell.KeyUp || ev.Key() == tcell.KeyDown || ev.Key() == tcell.KeyHome || ev.Key() == tcell.KeyEnd || ev.Key() == tcell.KeyPgUp || ev.Key() == tcell.KeyPgDn {
+				if !isShift {
+					b.clearSelection()
+				} else {
+					if !b.isSelecting {
+						b.isSelecting = true
+						b.selection.Start = b.cursor
+					}
+				}
+			}
+
+			if action, exists := ActionMap[ev.Key()]; exists {
+				action(editor, currentScreen)
+				needsLayout = true
+				// 💡 화면 점프 방지가 필요한 특정 비이동/비편집 단축키 목록
+				switch ev.Key() {
+				case tcell.KeyCtrlA, tcell.KeyCtrlC, tcell.KeyCtrlS, tcell.KeyF12,
+					tcell.KeyCtrlP, tcell.KeyCtrlF, tcell.KeyCtrlR, tcell.KeyCtrlG,
+					tcell.KeyCtrlT, tcell.KeyCtrlW, tcell.KeyCtrlBackslash, tcell.KeyCtrlN:
+					snapToCursor = false
+				}
+				continue
+			}
+
+			switch ev.Key() {
+			case tcell.KeyTab, tcell.KeyBacktab:
+				b.BeginTransaction()
+				s, e := b.getSelectionRange()
+				hasSel := b.HasSelection()
+				if !hasSel {
+					s = b.cursor
+					e = b.cursor
+				}
+				oldCursor := b.cursor
+
+				if isShift || ev.Key() == tcell.KeyBacktab {
+					for r := s.L; r <= e.L; r++ {
+						line := b.lines[r]
+						if len(line) > 0 {
+							removeCount := 0
+							if line[0] == '\t' {
+								removeCount = 1
+							} else {
+								for removeCount < len(line) && removeCount < editor.cfg.TabSize && line[removeCount] == ' ' {
+									removeCount++
+								}
+							}
+							if removeCount > 0 {
+								b.DeleteTextWithRecord(Loc{r, 0}, Loc{r, removeCount})
+								if r == oldCursor.L {
+									oldCursor.C -= removeCount
+									if oldCursor.C < 0 {
+										oldCursor.C = 0
+									}
+								}
+								if hasSel {
+									if r == s.L {
+										s.C -= removeCount
+										if s.C < 0 {
+											s.C = 0
+										}
+									}
+									if r == e.L {
+										e.C -= removeCount
+										if e.C < 0 {
+											e.C = 0
+										}
+									}
+								}
+							}
+						}
+					}
+				} else {
+					// 🟢 expand_tab 설정 상태에 따라 들여쓰기 텍스트를 다르게 빌드합니다.
+					var indentStr string
+					if editor.cfg.ExpandTab {
+						indentStr = strings.Repeat(" ", editor.cfg.TabSize)
+					} else {
+						indentStr = "\t"
+					}
+					indentLen := len([]rune(indentStr)) // 스페이스 개수(TabSize) 또는 탭 문자 1개(1)
+
+					if hasSel && s.L != e.L { // 💡 다중 줄 선택 시 전체 줄 들여쓰기
+						for r := e.L; r >= s.L; r-- {
+							b.InsertTextWithRecord(Loc{r, 0}, indentStr)
+							if r == oldCursor.L {
+								oldCursor.C += indentLen
+							}
+							if r == s.L {
+								s.C += indentLen
+							}
+							if r == e.L {
+								e.C += indentLen
+							}
+						}
+					} else {
+						// 💡 단일 줄 내에서 글자를 드래그한 상태면 지우고 탭 삽입
+						if hasSel {
+							b.DeleteSelection()
+							oldCursor = b.cursor
+							hasSel = false
+						}
+						b.InsertTextWithRecord(oldCursor, indentStr)
+						oldCursor.C += indentLen
+					}
+				}
+
+				b.cursor = b.alignToRuneBoundary(oldCursor)
+				if hasSel {
+					b.selection.Start = b.alignToRuneBoundary(s)
+					b.selection.End = b.alignToRuneBoundary(e)
+				}
+				b.EndTransaction()
+				needsLayout = true
+
+			case tcell.KeyEscape:
+				b.clearSelection()
+				snapToCursor = false
+
+			case tcell.KeyLeft:
+				if isCtrl {
+					b.moveWordLeft()
+				} else {
+					if b.cursor.C > 0 {
+						_, size := utf8.DecodeLastRune(b.lines[b.cursor.L][:b.cursor.C])
+						b.cursor.C -= size
+					} else if b.cursor.L > 0 {
+						b.cursor.L--
+						b.cursor.C = len(b.lines[b.cursor.L])
+					}
+				}
+			case tcell.KeyRight:
+				if isCtrl {
+					b.moveWordRight()
+				} else {
+					if b.cursor.C < len(b.lines[b.cursor.L]) {
+						_, size := utf8.DecodeRune(b.lines[b.cursor.L][b.cursor.C:])
+						b.cursor.C += size
+					} else if b.cursor.L < len(b.lines)-1 {
+						b.cursor.L++
+						b.cursor.C = 0
+					}
+				}
+			case tcell.KeyUp:
+				if isCtrl {
+					b.moveParagraphUp()
+				} else {
+					b.moveCursorVisualLine(-1, editor.cfg) // 🟢 O(1) 로컬 이동으로 교체
+				}
+			case tcell.KeyDown:
+				if isCtrl {
+					b.moveParagraphDown()
+				} else {
+					b.moveCursorVisualLine(1, editor.cfg) // 🟢 O(1) 로컬 이동으로 교체
+				}
+			case tcell.KeyPgUp:
+				b.moveCursorVisualLine(-(h - 2), editor.cfg) // 🟢 로컬 이동으로 교체
+			case tcell.KeyPgDn:
+				b.moveCursorVisualLine(h-2, editor.cfg) // 🟢 로컬 이동으로 교체
+			case tcell.KeyHome:
+				if isCtrl {
+					b.cursor = Loc{0, 0}
+				} else {
+					cursorSub := b.getCursorSub(editor.cfg)
+					currentVL := b.vCache[b.cursor.L][cursorSub]
+					b.cursor.C = currentVL.startCX // 🟢 로컬 계산으로 교체
+				}
+			case tcell.KeyEnd:
+				if isCtrl {
+					lastLineIdx := len(b.lines) - 1
+					if lastLineIdx < 0 {
+						lastLineIdx = 0
+					}
+					b.cursor = Loc{lastLineIdx, len(b.lines[lastLineIdx])}
+					b.stickToWrapEnd = true
+				} else {
+					cursorSub := b.getCursorSub(editor.cfg)
+					currentVL := b.vCache[b.cursor.L][cursorSub]
+					b.cursor.C = currentVL.endCX // 🟢 로컬 계산으로 교체
+					b.stickToWrapEnd = true
+				}
+			case tcell.KeyEnter:
+				b.BeginTransaction()
+				b.DeleteSelection()
+				indentStr := ""
+				if editor.cfg.AutoIndent {
+					line := b.lines[b.cursor.L]
+					for i := 0; i < b.cursor.C && i < len(line); i++ {
+						if line[i] == ' ' || line[i] == '\t' {
+							indentStr += string(line[i])
+						} else {
+							break
+						}
+					}
+				}
+				b.InsertTextWithRecord(b.cursor, "\n"+indentStr)
+				b.EndTransaction()
+				needsLayout = true
+
+			case tcell.KeyBackspace2, tcell.KeyBackspace:
+				b.BeginTransaction()
+				if !b.DeleteSelection() {
+					if b.cursor.C > 0 {
+						startX := b.cursor.C
+						if isCtrl || isAlt {
+							oldCursor := b.cursor
+							b.moveWordLeft()
+							startX = b.cursor.C
+							b.cursor = oldCursor
+							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
+						} else if editor.cfg.SmartBackspace {
+							// 💡 스마트 백스페이스 로직 추가
+							line := b.lines[b.cursor.L]
+							isAllSpaces := true
+							for i := 0; i < b.cursor.C; i++ {
+								if line[i] != ' ' {
+									isAllSpaces = false
 									break
 								}
 							}
-							continue
-						}
-						if buttons&tcell.WheelUp != 0 {
-							editor.activeBuffer = (editor.activeBuffer - 1 + len(editor.buffers)) % len(editor.buffers)
-							editor.needsFullRefresh = true
-							needsLayout = true
-							continue
-						}
-						if buttons&tcell.WheelDown != 0 {
-							editor.activeBuffer = (editor.activeBuffer + 1) % len(editor.buffers)
-							editor.needsFullRefresh = true
-							needsLayout = true
-							continue
-						}
-					}
-					outOfBounds := my < editor.tabHeight || my >= h-1
-					if buttons&tcell.WheelUp != 0 {
-						if !outOfBounds {
-							b.vOffsetSub--
-							if b.vOffsetSub < 0 {
-								if b.vOffsetL > 0 {
-									b.vOffsetL--
-									b.ensureVCache(b.vOffsetL, editor.cfg)
-									b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
-								} else {
-									b.vOffsetSub = 0
+							// 커서 앞이 전부 공백이라면 탭 크기 단위로 정렬하여 삭제
+							if isAllSpaces {
+								rem := b.cursor.C % editor.cfg.TabSize
+								if rem == 0 {
+									rem = editor.cfg.TabSize
 								}
-							}
-							needsLayout = true
-						}
-						continue
-					}
-					if buttons&tcell.WheelDown != 0 {
-						if !outOfBounds {
-							b.vOffsetSub++
-							b.ensureVCache(b.vOffsetL, editor.cfg)
-							if b.vOffsetSub >= len(b.vCache[b.vOffsetL]) {
-								if b.vOffsetL+1 < len(b.lines) {
-									b.vOffsetL++
-									b.vOffsetSub = 0
-								} else {
-									b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
-								}
-							}
-							needsLayout = true
-						}
-						continue
-					}
-					if buttons&tcell.Button1 != 0 {
-						isIndicatorEvent := false
-						if !outOfBounds {
-							relativeY := my - editor.tabHeight
-							if relativeY >= 0 {
-								currL := b.vOffsetL
-								currSub := b.vOffsetSub
-								for i := 0; i < relativeY; i++ {
-									b.ensureVCache(currL, editor.cfg)
-									currSub++
-									if currSub >= len(b.vCache[currL]) {
-										currSub = 0
-										currL++
-									}
-									if currL >= len(b.lines) {
-										currL = len(b.lines) - 1
-										b.ensureVCache(currL, editor.cfg)
-										currSub = len(b.vCache[currL]) - 1
-										break
-									}
-								}
-
-								if currL < len(b.lines) {
-									b.ensureVCache(currL, editor.cfg)
-									vl := b.vCache[currL][currSub]
-									lineNumWidth := b.getLineNumWidth(editor.cfg)
-									textMaxWidth := w - lineNumWidth
-									if textMaxWidth <= 0 {
-										textMaxWidth = 1
-									}
-
-									vlWidth := vl.width
-
-									leftIndX := lineNumWidth - 1
-									if lineNumWidth <= 0 {
-										leftIndX = 0
-									}
-									if b.hOffset > 0 && vlWidth > 0 && mx <= leftIndX+1 {
-										isIndicatorEvent = true
-										if isNewPress || isDrag {
-											b.hOffset -= 5
-											if b.hOffset < 0 {
-												b.hOffset = 0
-											}
-										}
-									}
-
-									if !isIndicatorEvent {
-										if vlWidth > b.hOffset+textMaxWidth && mx >= w-2 {
-											isIndicatorEvent = true
-											if isNewPress || isDrag {
-												b.hOffset += 5
-												if b.hOffset+textMaxWidth > vlWidth {
-													b.hOffset = vlWidth - textMaxWidth + 1
-												}
-											}
-										}
-									}
-								}
-							}
-						}
-
-						if isIndicatorEvent {
-							needsLayout = true
-							snapToCursor = false
-							continue
-						}
-
-						loc := b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
-						if isNewPress && outOfBounds {
-							continue
-						}
-
-						if isNewPress {
-							now := time.Now()
-							if now.Sub(lastClickTime) < 400*time.Millisecond && mx == lastClickX && my == lastClickY {
-								clickCount++
+								startX -= rem
 							} else {
-								clickCount = 1
+								_, size := utf8.DecodeLastRune(line[:b.cursor.C])
+								startX -= size
 							}
-							lastClickTime = now
-							lastClickX, lastClickY = mx, my
-
-							if clickCount == 1 {
-								if !b.isSelecting {
-									b.isSelecting = true
-									b.selection.Start = loc
-								}
-								b.selection.End = loc
-								b.cursor = loc
-							} else if clickCount == 2 {
-								b.cursor = loc
-								b.selectWordAtCursor()
-							} else if clickCount >= 3 {
-								b.cursor = loc
-								b.selectLineAtCursor()
-								clickCount = 0
-							}
+							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, b.cursor)
 						} else {
-							// 💡 마우스가 완벽히 멈춰있을 때는 더블/트리플 클릭 선택 영역을 취소하지 않음!
-							// 💡 마우스가 완벽히 멈춰있을 때는 더블/트리플 클릭 선택 영역을 취소하지 않음!
-							if mx != lastClickX || my != lastClickY {
-								b.selection.End = loc
-								b.cursor = loc
-							}
-							// 🟢 O(1) 가상라인 역방향 이동
-							if my < editor.tabHeight && (b.vOffsetL > 0 || b.vOffsetSub > 0) {
-								b.vOffsetSub--
-								if b.vOffsetSub < 0 {
-									b.vOffsetL--
-									b.ensureVCache(b.vOffsetL, editor.cfg)
-									b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
-								}
-								// 💡 [추가] 스크롤되어 새로 나타난 맨 윗줄 좌표를 즉시 다시 계산해서 주입!
-								loc = b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
-								b.selection.End = loc
-								b.cursor = loc
-								// 🟢 O(1) 가상라인 순방향 이동
-							} else if my >= h-1 {
-								b.vOffsetSub++
-								b.ensureVCache(b.vOffsetL, editor.cfg)
-								if b.vOffsetSub >= len(b.vCache[b.vOffsetL]) {
-									if b.vOffsetL+1 < len(b.lines) {
-										b.vOffsetL++
-										b.vOffsetSub = 0
-									} else {
-										b.vOffsetSub = len(b.vCache[b.vOffsetL]) - 1
-									}
-								}
-								// 💡 [추가] 아래쪽도 스크롤 직후 새 줄 좌표를 즉시 동기화!
-								loc = b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
-								b.selection.End = loc
-								b.cursor = loc
-							}
+							// 기본 백스페이스 (글자 1개 삭제)
+							_, size := utf8.DecodeLastRune(b.lines[b.cursor.L][:b.cursor.C])
+							startX -= size
+							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
 						}
-						snapToCursor = true
+					} else if b.cursor.L > 0 {
+						b.DeleteTextWithRecord(Loc{b.cursor.L - 1, len(b.lines[b.cursor.L-1])}, b.cursor)
+					}
+				}
+				b.EndTransaction()
+				needsLayout = true
+
+			case tcell.KeyDelete:
+				b.BeginTransaction()
+				if !b.DeleteSelection() {
+					lineLen := len(b.lines[b.cursor.L])
+					if isCtrl || isAlt {
+						if b.cursor.C < lineLen {
+							oldCursor := b.cursor
+							b.moveWordRight()
+							endX := b.cursor.C
+							b.cursor = oldCursor
+							b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L, endX})
+						} else if b.cursor.L < len(b.lines)-1 {
+							b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L + 1, 0})
+						}
 					} else {
-						if b.isSelecting {
-							b.isSelecting = false
-							if b.selection.Start == b.selection.End {
-								b.clearSelection()
-							}
+						if b.cursor.C < lineLen {
+							_, size := utf8.DecodeRune(b.lines[b.cursor.L][b.cursor.C:])
+							b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L, b.cursor.C + size})
+						} else if b.cursor.L < len(b.lines)-1 {
+							b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L + 1, 0})
 						}
 					}
-					case *tcell.EventKey:
-						isCtrl := (ev.Modifiers() & tcell.ModCtrl) != 0
-						isShift := (ev.Modifiers() & tcell.ModShift) != 0
-						isAlt := (ev.Modifiers() & tcell.ModAlt) != 0
-						snapToCursor = true
+				}
+				b.EndTransaction()
+				needsLayout = true
 
-						if ev.Key() != tcell.KeyEnd {
-							b.stickToWrapEnd = false
-						}
-
-						// 💡 탭 좌우 이동 시 화면 렌더링 캐시 동기화
-						if isAlt && ev.Rune() == ',' {
-							editor.activeBuffer = (editor.activeBuffer - 1 + len(editor.buffers)) % len(editor.buffers)
-							editor.needsFullRefresh = true
-							needsLayout = true
-							continue
-						}
-						if isAlt && ev.Rune() == '.' {
-							editor.activeBuffer = (editor.activeBuffer + 1) % len(editor.buffers)
-							editor.needsFullRefresh = true
-							needsLayout = true
-							continue
-						}
-
-						if editor.promptMode {
-							// 💡 Alert 모드일 때는 y/n이 아니라 Enter나 Esc로 단순히 닫음
-							if editor.promptType == "alert" {
-								if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyEnter {
-									editor.promptMode = false
-									needsLayout = true
-								}
-								continue
-							}
-
-							if ev.Key() == tcell.KeyEscape || ev.Rune() == 'n' || ev.Rune() == 'N' {
-								editor.promptMode = false
-								if editor.promptType == "external_change" && len(editor.externalChangeQueue) > 0 {
-									editor.externalChangeQueue = editor.externalChangeQueue[1:]
-									if len(editor.externalChangeQueue) > 0 {
-										editor.promptMode = true
-										editor.targetCloseBuffer = editor.externalChangeQueue[0]
-									}
-								}
-								needsLayout = true
-							} else if ev.Rune() == 'y' || ev.Rune() == 'Y' {
-								editor.promptMode = false
-
-								// 💡 큐를 진행하기 전에 현재 타겟 탭을 캡처합니다.
-								target := editor.targetCloseBuffer
-								isValidTarget := target >= 0 && target < len(editor.buffers)
-
-								// advance queue
-								if editor.promptType == "external_change" && len(editor.externalChangeQueue) > 0 {
-									editor.externalChangeQueue = editor.externalChangeQueue[1:]
-									if len(editor.externalChangeQueue) > 0 {
-										editor.promptMode = true
-										editor.targetCloseBuffer = editor.externalChangeQueue[0] // next prompt
-									}
-								}
-
-								if editor.promptType == "quit" {
-									shuttingDown.Store(true)
-									currentScreen.Fini()
-									os.Exit(0)
-								} else if editor.promptType == "close" {
-									if !isValidTarget {
-										continue
-									}
-									if len(editor.buffers) <= 1 {
-										shuttingDown.Store(true)
-										currentScreen.Fini()
-										os.Exit(0)
-									}
-									editor.closeBuffer(target)
-									editor.needsFullRefresh = true
-									needsLayout = true
-								} else if editor.promptType == "reset_config" {
-									defaultCfg := DefaultConfig()
-										data, _ := json.MarshalIndent(defaultCfg, "", "    ")
-										_ = ioutil.WriteFile(getConfigPath(), data, 0644)
-										editor.cfg = defaultCfg
-										for _, buf := range editor.buffers {
-											if buf.isConfig {
-												buf.isModified = false
-												buf.reloadFromDisk()
-											}
-										}
-										editor.needsFullRefresh = true
-										needsLayout = true
-								} else if editor.promptType == "reopen" {
-									editor.getActive().reopenWithEncoding(editor.targetEncoding)
-									editor.needsFullRefresh = true
-									needsLayout = true
-								} else if editor.promptType == "close_config" {
-									if !isValidTarget {
-										continue
-									}
-									editor.closeBuffer(target)
-									editor.activeBuffer = 0
-									editor.needsFullRefresh = true
-									needsLayout = true
-								} else if editor.promptType == "external_change" {
-									if !isValidTarget {
-										continue
-									}
-									bufToReload := editor.buffers[target]
-									bufToReload.isModified = false
-									if bufToReload.reloadFromDisk() {
-										if bufToReload.isConfig {
-											var newCfg Config
-											if err := json.Unmarshal([]byte(bufToReload.getContent()), &newCfg); err == nil {
-												editor.cfg = newCfg
-											}
-										}
-									}
-									editor.needsFullRefresh = true
-									needsLayout = true
-									snapToCursor = true
-								}
-							}
-							continue
-						}
-
-						if editor.paletteActive {
-							_, screenH := currentScreen.Size()
-							pageStep := screenH - 6
-							if pageStep < 5 {
-								pageStep = 5
-							}
-
-							switch ev.Key() {
-								case tcell.KeyEscape:
-									editor.paletteActive = false
-								case tcell.KeyUp:
-									editor.paletteCursor--
-									if editor.paletteCursor < 0 {
-										editor.paletteCursor = len(editor.paletteItems) - 1
-									}
-								case tcell.KeyDown:
-									editor.paletteCursor++
-									if editor.paletteCursor >= len(editor.paletteItems) {
-										editor.paletteCursor = 0
-									}
-								case tcell.KeyPgUp:
-									editor.paletteCursor -= pageStep
-									if editor.paletteCursor < 0 {
-										editor.paletteCursor = 0
-									}
-								case tcell.KeyPgDn:
-									editor.paletteCursor += pageStep
-									if editor.paletteCursor >= len(editor.paletteItems) {
-										editor.paletteCursor = len(editor.paletteItems) - 1
-									}
-								case tcell.KeyEnter:
-									action := editor.paletteItems[editor.paletteCursor].Action
-									editor.paletteActive = false
-									if action != nil {
-										action(editor, currentScreen)
-									}
-								case tcell.KeyRune:
-									if idx := getMenuJumpIdx(editor.paletteItems, ev.Rune(), editor.paletteCursor); idx != -1 {
-										editor.paletteCursor = idx
-									}
-							}
-
-							// 💡 자동 스크롤 추적 보정
-							visibleItems := editor.paletteH - 2
-							if visibleItems > 0 {
-								if editor.paletteCursor < editor.menuScrollOffset {
-									editor.menuScrollOffset = editor.paletteCursor
-								} else if editor.paletteCursor >= editor.menuScrollOffset+visibleItems {
-									editor.menuScrollOffset = editor.paletteCursor - visibleItems + 1
-								}
-							}
-							needsLayout = true
-							continue
-						}
-
-						if editor.ctxMenuActive {
-							_, screenH := currentScreen.Size()
-							pageStep := screenH - 6
-							if pageStep < 5 {
-								pageStep = 5
-							}
-
-							switch ev.Key() {
-								case tcell.KeyEscape:
-									editor.ctxMenuActive = false
-								case tcell.KeyUp:
-									editor.ctxMenuCursor--
-									if editor.ctxMenuCursor < 0 {
-										editor.ctxMenuCursor = len(editor.ctxMenuItems) - 1
-									}
-								case tcell.KeyDown:
-									editor.ctxMenuCursor++
-									if editor.ctxMenuCursor >= len(editor.ctxMenuItems) {
-										editor.ctxMenuCursor = 0
-									}
-								case tcell.KeyPgUp:
-									editor.ctxMenuCursor -= pageStep
-									if editor.ctxMenuCursor < 0 {
-										editor.ctxMenuCursor = 0
-									}
-								case tcell.KeyPgDn:
-									editor.ctxMenuCursor += pageStep
-									if editor.ctxMenuCursor >= len(editor.ctxMenuItems) {
-										editor.ctxMenuCursor = len(editor.ctxMenuItems) - 1
-									}
-								case tcell.KeyEnter:
-									action := editor.ctxMenuItems[editor.ctxMenuCursor].Action
-									editor.ctxMenuActive = false
-									if action != nil {
-										action(editor, currentScreen)
-									}
-								case tcell.KeyRune:
-									if idx := getMenuJumpIdx(editor.ctxMenuItems, ev.Rune(), editor.ctxMenuCursor); idx != -1 {
-										editor.ctxMenuCursor = idx
-									}
-							}
-
-							// 💡 자동 스크롤 추적 보정
-							visibleItems := editor.ctxMenuH - 2
-							if visibleItems > 0 {
-								if editor.ctxMenuCursor < editor.menuScrollOffset {
-									editor.menuScrollOffset = editor.ctxMenuCursor
-								} else if editor.ctxMenuCursor >= editor.menuScrollOffset+visibleItems {
-									editor.menuScrollOffset = editor.ctxMenuCursor - visibleItems + 1
-								}
-							}
-							needsLayout = true
-							continue
-						}
-
-						if editor.encodeMenuActive {
-							_, screenH := currentScreen.Size()
-							pageStep := screenH - 6
-							if pageStep < 5 {
-								pageStep = 5
-							}
-
-							switch ev.Key() {
-								case tcell.KeyEscape:
-									editor.encodeMenuActive = false
-									editor.encodeMenuState = 0
-								case tcell.KeyUp:
-									editor.encodeMenuCursor--
-									if editor.encodeMenuCursor < 0 {
-										editor.encodeMenuCursor = len(editor.encodeMenuItems) - 1
-									}
-								case tcell.KeyDown:
-									editor.encodeMenuCursor++
-									if editor.encodeMenuCursor >= len(editor.encodeMenuItems) {
-										editor.encodeMenuCursor = 0
-									}
-								case tcell.KeyPgUp:
-									editor.encodeMenuCursor -= pageStep
-									if editor.encodeMenuCursor < 0 {
-										editor.encodeMenuCursor = 0
-									}
-								case tcell.KeyPgDn:
-									editor.encodeMenuCursor += pageStep
-									if editor.encodeMenuCursor >= len(editor.encodeMenuItems) {
-										editor.encodeMenuCursor = len(editor.encodeMenuItems) - 1
-									}
-								case tcell.KeyEnter:
-									action := editor.encodeMenuItems[editor.encodeMenuCursor].Action
-									editor.encodeMenuActive = false
-									editor.encodeMenuState = 0
-									if action != nil {
-										action(editor, currentScreen)
-									}
-								case tcell.KeyRune:
-									if idx := getMenuJumpIdx(editor.encodeMenuItems, ev.Rune(), editor.encodeMenuCursor); idx != -1 {
-										editor.encodeMenuCursor = idx
-									}
-							}
-
-							// 💡 자동 스크롤 추적 보정
-							visibleItems := editor.encodeMenuH - 2
-							if visibleItems > 0 {
-								if editor.encodeMenuCursor < editor.menuScrollOffset {
-									editor.menuScrollOffset = editor.encodeMenuCursor
-								} else if editor.encodeMenuCursor >= editor.menuScrollOffset+visibleItems {
-									editor.menuScrollOffset = editor.encodeMenuCursor - visibleItems + 1
-								}
-							}
-							needsLayout = true
-							continue
-						}
-
-						if b.searchMode || b.gotoMode {
-							if ev.Key() == tcell.KeyEscape {
-								b.searchMode = false
-								b.isReplace = false
-								b.replaceStep = 0
-								b.gotoMode = false
-								b.clearSelection()
-								b.isInputSelect = false
-								needsLayout = true
-								continue
-							}
-
-							var targetStr *[]rune
-							if b.gotoMode {
-								targetStr = &b.gotoInput
-							} else if b.isReplace && b.replaceStep == 1 {
-								targetStr = &b.searchQuery
-							} else if b.isReplace && b.replaceStep == 2 {
-								targetStr = &b.replaceQuery
-							} else if !b.isReplace {
-								targetStr = &b.searchQuery
-							}
-
-							if targetStr != nil {
-								hasSel := b.isInputSelect && b.inputSelStart != b.inputSelEnd
-								selStart, selEnd := b.inputSelStart, b.inputSelEnd
-								if selStart > selEnd {
-									selStart, selEnd = selEnd, selStart
-								}
-
-								deleteInputSel := func() {
-									if hasSel {
-										*targetStr = append((*targetStr)[:selStart], (*targetStr)[selEnd:]...)
-										b.inputCX = selStart
-										b.isInputSelect = false
-										b.inputSelStart = 0
-										b.inputSelEnd = 0
-									}
-								}
-
-								if ev.Key() == tcell.KeyCtrlA {
-									b.isInputSelect = true
-									b.inputSelStart = 0
-									b.inputSelEnd = len(*targetStr)
-									b.inputCX = len(*targetStr)
-									needsLayout = true
-									continue
-								}
-								if ev.Key() == tcell.KeyCtrlC && hasSel {
-									clipboard.WriteAll(string((*targetStr)[selStart:selEnd]))
-									continue
-								}
-								if ev.Key() == tcell.KeyCtrlX && hasSel {
-									clipboard.WriteAll(string((*targetStr)[selStart:selEnd]))
-									deleteInputSel()
-									if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
-										b.matches = nil
-										b.matchIdx = -1
-									}
-									needsLayout = true
-									continue
-								}
-								if ev.Key() == tcell.KeyCtrlV {
-									text, err := clipboard.ReadAll()
-									if err == nil && text != "" {
-										deleteInputSel()
-										text = strings.ReplaceAll(text, "\r\n", " ")
-										text = strings.ReplaceAll(text, "\n", " ")
-										text = strings.ReplaceAll(text, "\r", "")
-										runes := []rune(text)
-										*targetStr = append((*targetStr)[:b.inputCX], append(runes, (*targetStr)[b.inputCX:]...)...)
-										b.inputCX += len(runes)
-										if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
-											b.matches = nil
-											b.matchIdx = -1
-										}
-										needsLayout = true
-									}
-									continue
-								}
-
-								if ev.Key() == tcell.KeyLeft {
-									if !isShift && hasSel {
-										b.isInputSelect = false
-										b.inputCX = selStart
-									} else {
-										if b.inputCX > 0 {
-											b.inputCX--
-										}
-										if isShift {
-											if !b.isInputSelect {
-												b.isInputSelect = true
-												b.inputSelStart = b.inputCX + 1
-											}
-											b.inputSelEnd = b.inputCX
-										} else {
-											b.isInputSelect = false
-										}
-									}
-									needsLayout = true
-									continue
-								}
-								if ev.Key() == tcell.KeyRight {
-									if !isShift && hasSel {
-										b.isInputSelect = false
-										b.inputCX = selEnd
-									} else {
-										if b.inputCX < len(*targetStr) {
-											b.inputCX++
-										}
-										if isShift {
-											if !b.isInputSelect {
-												b.isInputSelect = true
-												b.inputSelStart = b.inputCX - 1
-											}
-											b.inputSelEnd = b.inputCX
-										} else {
-											b.isInputSelect = false
-										}
-									}
-									needsLayout = true
-									continue
-								}
-								if ev.Key() == tcell.KeyHome {
-									if !isShift && hasSel {
-										b.isInputSelect = false
-									}
-									if isShift {
-										if !b.isInputSelect {
-											b.isInputSelect = true
-											b.inputSelStart = b.inputCX
-										}
-										b.inputCX = 0
-										b.inputSelEnd = 0
-									} else {
-										b.inputCX = 0
-										b.isInputSelect = false
-									}
-									needsLayout = true
-									continue
-								}
-								if ev.Key() == tcell.KeyEnd {
-									if !isShift && hasSel {
-										b.isInputSelect = false
-									}
-									if isShift {
-										if !b.isInputSelect {
-											b.isInputSelect = true
-											b.inputSelStart = b.inputCX
-										}
-										b.inputCX = len(*targetStr)
-										b.inputSelEnd = b.inputCX
-									} else {
-										b.inputCX = len(*targetStr)
-										b.isInputSelect = false
-									}
-									needsLayout = true
-									continue
-								}
-
-								if ev.Key() == tcell.KeyBackspace || ev.Key() == tcell.KeyBackspace2 {
-									if hasSel {
-										deleteInputSel()
-										if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
-											b.matches = nil
-											b.matchIdx = -1
-										}
-										needsLayout = true
-									} else if b.inputCX > 0 {
-										*targetStr = append((*targetStr)[:b.inputCX-1], (*targetStr)[b.inputCX:]...)
-										b.inputCX--
-										if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
-											b.matches = nil
-											b.matchIdx = -1
-										}
-										needsLayout = true
-									} else if b.inputCX == 0 && b.isReplace && b.replaceStep == 2 {
-										b.replaceStep = 1
-										b.inputCX = len(b.searchQuery)
-										b.isInputSelect = false
-										needsLayout = true
-									}
-									continue
-								}
-								if ev.Key() == tcell.KeyDelete {
-									if hasSel {
-										deleteInputSel()
-										if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
-											b.matches = nil
-											b.matchIdx = -1
-										}
-										needsLayout = true
-									} else if b.inputCX < len(*targetStr) {
-										*targetStr = append((*targetStr)[:b.inputCX], (*targetStr)[b.inputCX+1:]...)
-										if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
-											b.matches = nil
-											b.matchIdx = -1
-										}
-										needsLayout = true
-									}
-									continue
-								}
-								if ev.Key() == tcell.KeyRune && ev.Rune() != 0 {
-									deleteInputSel()
-									*targetStr = append((*targetStr)[:b.inputCX], append([]rune{ev.Rune()}, (*targetStr)[b.inputCX:]...)...)
-									b.inputCX++
-									if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
-										b.matches = nil
-										b.matchIdx = -1
-									}
-									needsLayout = true
-									continue
-								}
-							}
-
-							if b.searchMode {
-								if ev.Key() == tcell.KeyCtrlA && b.isReplace && b.replaceStep == 3 {
-									if len(b.searchQuery) > 0 && len(b.matches) > 0 {
-										b.BeginTransaction()
-										for i := len(b.matches) - 1; i >= 0; i-- {
-											m := b.matches[i]
-											b.DeleteTextWithRecord(m.loc, Loc{m.loc.L, m.loc.C + m.matchLen})
-											b.InsertTextWithRecord(m.loc, string(b.replaceQuery))
-										}
-										b.EndTransaction()
-										b.searchMode = false
-										b.isReplace = false
-										b.replaceStep = 0
-										b.clearSelection()
-										needsLayout = true
-									}
-									continue
-								}
-
-								if ev.Key() == tcell.KeyUp {
-									if len(b.matches) > 0 {
-										b.matchIdx = (b.matchIdx - 1 + len(b.matches)) % len(b.matches)
-										b.jumpToMatch()
-										snapToCursor = true
-									}
-									continue
-								}
-								if ev.Key() == tcell.KeyDown {
-									if len(b.matches) > 0 {
-										b.matchIdx = (b.matchIdx + 1) % len(b.matches)
-										b.jumpToMatch()
-										snapToCursor = true
-									}
-									continue
-								}
-								if ev.Key() == tcell.KeyEnter {
-									if b.searchMode && (!b.isReplace || b.replaceStep == 1) && b.matchIdx == -1 {
-										b.findAllMatches(editor.cfg.OverlapSearch)
-										if len(b.matches) > 0 {
-											b.matchIdx = b.findInitialMatchIdx(b.cursor, isShift)
-											b.jumpToMatch()
-											snapToCursor = true
-										}
-										if b.isReplace && b.replaceStep == 1 {
-											b.replaceStep = 2
-											b.inputCX = len(b.replaceQuery)
-											b.isInputSelect = false
-										}
-									} else if isShift {
-										if len(b.matches) > 0 {
-											b.matchIdx = (b.matchIdx - 1 + len(b.matches)) % len(b.matches)
-											b.jumpToMatch()
-											snapToCursor = true
-										}
-									} else {
-										if b.isReplace {
-											if b.replaceStep == 1 {
-												b.replaceStep = 2
-												b.inputCX = len(b.replaceQuery)
-												b.isInputSelect = false
-												if len(b.matches) > 0 {
-													b.matchIdx = b.findInitialMatchIdx(b.cursor, false)
-													b.jumpToMatch()
-													snapToCursor = true
-												}
-											} else if b.replaceStep == 2 {
-												b.replaceStep = 3
-												b.findAllMatches(editor.cfg.OverlapSearch)
-												if len(b.matches) > 0 {
-													b.matchIdx = b.findInitialMatchIdx(b.cursor, false)
-													b.jumpToMatch()
-													snapToCursor = true
-												}
-											} else if b.replaceStep == 3 {
-												b.replaceCurrent(editor.cfg.OverlapSearch)
-												needsLayout = true
-												snapToCursor = true
-											}
-										} else {
-											if len(b.matches) > 0 {
-												b.matchIdx = (b.matchIdx + 1) % len(b.matches)
-												b.jumpToMatch()
-												snapToCursor = true
-											}
-										}
-									}
-									continue
-								}
-							}
-
-							if b.gotoMode {
-								if ev.Key() == tcell.KeyEnter {
-									inputStr := string(b.gotoInput)
-									parts := strings.Split(inputStr, ",")
-									lineNum, colNum := 0, 0
-									fmt.Sscanf(strings.TrimSpace(parts[0]), "%d", &lineNum)
-									if len(parts) > 1 {
-										fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &colNum)
-									}
-									if lineNum > 0 {
-										lineNum--
-										if lineNum >= len(b.lines) {
-											lineNum = len(b.lines) - 1
-										}
-										b.cursor.L = lineNum
-										targetRuneIdx := colNum - 1
-										if targetRuneIdx <= 0 {
-											b.cursor.C = 0
-										} else {
-											byteOffset := 0
-											lineData := b.lines[b.cursor.L]
-											runeCount := 0
-											for byteOffset < len(lineData) && runeCount < targetRuneIdx {
-												_, size := utf8.DecodeRune(lineData[byteOffset:])
-												byteOffset += size
-												runeCount++
-											}
-											b.cursor.C = byteOffset
-										}
-									}
-									b.gotoMode = false
-									snapToCursor = true
-									needsLayout = true
-									continue
-								}
-							}
-							continue
-						}
-						// 💡 [여기가 올바른 위치!] 읽기 전용 탭의 텍스트 수정 원천 차단
-						if b.isReadOnly {
-							k := ev.Key()
-							if k == tcell.KeyRune || k == tcell.KeyEnter || k == tcell.KeyBackspace || k == tcell.KeyBackspace2 || k == tcell.KeyDelete || k == tcell.KeyTab {
-								continue
-							}
-							if isAlt && (k == tcell.KeyUp || k == tcell.KeyDown) { // 줄 이동 단축키 차단
-								continue
-							}
-						}
-
-						if isAlt && ev.Key() == tcell.KeyUp {
-							if b.cursor.L > 0 {
-								oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
-								b.BeginTransaction()
-								currStr := string(b.lines[oldL])
-								prevStr := string(b.lines[oldL-1])
-								b.DeleteTextWithRecord(Loc{oldL - 1, 0}, Loc{oldL, len(b.lines[oldL])})
-								b.InsertTextWithRecord(Loc{oldL - 1, 0}, currStr+"\n"+prevStr)
-								b.cursor = b.clampLoc(Loc{oldL - 1, oldC}) // 💡 절대 에러 방지
-								b.EndTransaction()
-								needsLayout = true
-							}
-							continue
-						}
-						if isAlt && ev.Key() == tcell.KeyDown {
-							if b.cursor.L < len(b.lines)-1 {
-								oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
-								b.BeginTransaction()
-								currStr := string(b.lines[oldL])
-								nextStr := string(b.lines[oldL+1])
-								b.DeleteTextWithRecord(Loc{oldL, 0}, Loc{oldL + 1, len(b.lines[oldL+1])})
-								b.InsertTextWithRecord(Loc{oldL, 0}, nextStr+"\n"+currStr)
-								b.cursor = b.clampLoc(Loc{oldL + 1, oldC}) // 💡 절대 에러 방지
-								b.EndTransaction()
-								needsLayout = true
-							}
-							continue
-						}
-						if ev.Key() == tcell.KeyLeft || ev.Key() == tcell.KeyRight || ev.Key() == tcell.KeyUp || ev.Key() == tcell.KeyDown || ev.Key() == tcell.KeyHome || ev.Key() == tcell.KeyEnd || ev.Key() == tcell.KeyPgUp || ev.Key() == tcell.KeyPgDn {
-							if !isShift {
-								b.clearSelection()
-							} else {
-								if !b.isSelecting {
-									b.isSelecting = true
-									b.selection.Start = b.cursor
-								}
-							}
-						}
-
-						if action, exists := ActionMap[ev.Key()]; exists {
-							action(editor, currentScreen)
-							needsLayout = true
-							// 💡 MS 메모장처럼 Ctrl+A 전체 선택 시 화면 점프 방지!
-							if ev.Key() == tcell.KeyCtrlA {
-								snapToCursor = false
-							}
-							continue
-						}
-
-						switch ev.Key() {
-							case tcell.KeyTab, tcell.KeyBacktab:
-								b.BeginTransaction()
-								s, e := b.getSelectionRange()
-								hasSel := b.HasSelection()
-								if !hasSel {
-									s = b.cursor
-									e = b.cursor
-								}
-								oldCursor := b.cursor
-
-								if isShift || ev.Key() == tcell.KeyBacktab {
-									for r := s.L; r <= e.L; r++ {
-										line := b.lines[r]
-										if len(line) > 0 {
-											removeCount := 0
-											if line[0] == '\t' {
-												removeCount = 1
-											} else {
-												for removeCount < len(line) && removeCount < editor.cfg.TabSize && line[removeCount] == ' ' {
-													removeCount++
-												}
-											}
-											if removeCount > 0 {
-												b.DeleteTextWithRecord(Loc{r, 0}, Loc{r, removeCount})
-												if r == oldCursor.L {
-													oldCursor.C -= removeCount
-													if oldCursor.C < 0 {
-														oldCursor.C = 0
-													}
-												}
-												if hasSel {
-													if r == s.L {
-														s.C -= removeCount
-														if s.C < 0 {
-															s.C = 0
-														}
-													}
-													if r == e.L {
-														e.C -= removeCount
-														if e.C < 0 {
-															e.C = 0
-														}
-													}
-												}
-											}
-										}
-									}
-								} else {
-									// 🟢 expand_tab 설정 상태에 따라 들여쓰기 텍스트를 다르게 빌드합니다.
-									var indentStr string
-									if editor.cfg.ExpandTab {
-										indentStr = strings.Repeat(" ", editor.cfg.TabSize)
-									} else {
-										indentStr = "\t"
-									}
-									indentLen := len([]rune(indentStr)) // 스페이스 개수(TabSize) 또는 탭 문자 1개(1)
-
-									if hasSel && s.L != e.L { // 💡 다중 줄 선택 시 전체 줄 들여쓰기
-										for r := e.L; r >= s.L; r-- {
-											b.InsertTextWithRecord(Loc{r, 0}, indentStr)
-											if r == oldCursor.L {
-												oldCursor.C += indentLen
-											}
-											if r == s.L {
-												s.C += indentLen
-											}
-											if r == e.L {
-												e.C += indentLen
-											}
-										}
-									} else {
-										// 💡 단일 줄 내에서 글자를 드래그한 상태면 지우고 탭 삽입
-										if hasSel {
-											b.DeleteSelection()
-											oldCursor = b.cursor
-											hasSel = false
-										}
-										b.InsertTextWithRecord(oldCursor, indentStr)
-										oldCursor.C += indentLen
-									}
-								}
-
-								b.cursor = b.alignToRuneBoundary(oldCursor)
-								if hasSel {
-									b.selection.Start = b.alignToRuneBoundary(s)
-									b.selection.End = b.alignToRuneBoundary(e)
-								}
-								b.EndTransaction()
-								needsLayout = true
-
-								case tcell.KeyLeft:
-									if isCtrl {
-										b.moveWordLeft()
-									} else {
-										if b.cursor.C > 0 {
-											_, size := utf8.DecodeLastRune(b.lines[b.cursor.L][:b.cursor.C])
-											b.cursor.C -= size
-										} else if b.cursor.L > 0 {
-											b.cursor.L--
-											b.cursor.C = len(b.lines[b.cursor.L])
-										}
-									}
-								case tcell.KeyRight:
-									if isCtrl {
-										b.moveWordRight()
-									} else {
-										if b.cursor.C < len(b.lines[b.cursor.L]) {
-											_, size := utf8.DecodeRune(b.lines[b.cursor.L][b.cursor.C:])
-											b.cursor.C += size
-										} else if b.cursor.L < len(b.lines)-1 {
-											b.cursor.L++
-											b.cursor.C = 0
-										}
-									}
-								case tcell.KeyUp:
-									if isCtrl {
-										b.moveParagraphUp()
-									} else {
-										b.moveCursorVisualLine(-1, editor.cfg) // 🟢 O(1) 로컬 이동으로 교체
-									}
-								case tcell.KeyDown:
-									if isCtrl {
-										b.moveParagraphDown()
-									} else {
-										b.moveCursorVisualLine(1, editor.cfg) // 🟢 O(1) 로컬 이동으로 교체
-									}
-								case tcell.KeyPgUp:
-									b.moveCursorVisualLine(-(h - 2), editor.cfg) // 🟢 로컬 이동으로 교체
-								case tcell.KeyPgDn:
-									b.moveCursorVisualLine(h-2, editor.cfg) // 🟢 로컬 이동으로 교체
-								case tcell.KeyHome:
-									if isCtrl {
-										b.cursor = Loc{0, 0}
-									} else {
-										cursorSub := b.getCursorSub(editor.cfg)
-										currentVL := b.vCache[b.cursor.L][cursorSub]
-										b.cursor.C = currentVL.startCX // 🟢 로컬 계산으로 교체
-									}
-								case tcell.KeyEnd:
-									if isCtrl {
-										lastLineIdx := len(b.lines) - 1
-										if lastLineIdx < 0 {
-											lastLineIdx = 0
-										}
-										b.cursor = Loc{lastLineIdx, len(b.lines[lastLineIdx])}
-										b.stickToWrapEnd = true
-									} else {
-										cursorSub := b.getCursorSub(editor.cfg)
-										currentVL := b.vCache[b.cursor.L][cursorSub]
-										b.cursor.C = currentVL.endCX // 🟢 로컬 계산으로 교체
-										b.stickToWrapEnd = true
-									}
-								case tcell.KeyEnter:
-									b.BeginTransaction()
-									b.DeleteSelection()
-									indentStr := ""
-									if editor.cfg.AutoIndent {
-										line := b.lines[b.cursor.L]
-										for i := 0; i < b.cursor.C && i < len(line); i++ {
-											if line[i] == ' ' || line[i] == '\t' {
-												indentStr += string(line[i])
-											} else {
-												break
-											}
-										}
-									}
-									b.InsertTextWithRecord(b.cursor, "\n"+indentStr)
-									b.EndTransaction()
-									needsLayout = true
-
-								case tcell.KeyBackspace2, tcell.KeyBackspace:
-									b.BeginTransaction()
-									if !b.DeleteSelection() {
-										if b.cursor.C > 0 {
-											startX := b.cursor.C
-											if isCtrl || isAlt {
-												oldCursor := b.cursor
-												b.moveWordLeft()
-												startX = b.cursor.C
-												b.cursor = oldCursor
-												b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
-											} else if editor.cfg.SmartBackspace {
-												// 💡 스마트 백스페이스 로직 추가
-												line := b.lines[b.cursor.L]
-												isAllSpaces := true
-												for i := 0; i < b.cursor.C; i++ {
-													if line[i] != ' ' {
-														isAllSpaces = false
-														break
-													}
-												}
-												// 커서 앞이 전부 공백이라면 탭 크기 단위로 정렬하여 삭제
-												if isAllSpaces {
-													rem := b.cursor.C % editor.cfg.TabSize
-													if rem == 0 {
-														rem = editor.cfg.TabSize
-													}
-													startX -= rem
-												} else {
-													_, size := utf8.DecodeLastRune(line[:b.cursor.C])
-													startX -= size
-												}
-												b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, b.cursor)
-											} else {
-												// 기본 백스페이스 (글자 1개 삭제)
-												_, size := utf8.DecodeLastRune(b.lines[b.cursor.L][:b.cursor.C])
-												startX -= size
-												b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
-											}
-										} else if b.cursor.L > 0 {
-											b.DeleteTextWithRecord(Loc{b.cursor.L - 1, len(b.lines[b.cursor.L-1])}, b.cursor)
-										}
-									}
-									b.EndTransaction()
-									needsLayout = true
-
-								case tcell.KeyDelete:
-									b.BeginTransaction()
-									if !b.DeleteSelection() {
-										lineLen := len(b.lines[b.cursor.L])
-										if isCtrl || isAlt {
-											if b.cursor.C < lineLen {
-												oldCursor := b.cursor
-												b.moveWordRight()
-												endX := b.cursor.C
-												b.cursor = oldCursor
-												b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L, endX})
-											} else if b.cursor.L < len(b.lines)-1 {
-												b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L + 1, 0})
-											}
-										} else {
-											if b.cursor.C < lineLen {
-												_, size := utf8.DecodeRune(b.lines[b.cursor.L][b.cursor.C:])
-												b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L, b.cursor.C + size})
-											} else if b.cursor.L < len(b.lines)-1 {
-												b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L + 1, 0})
-											}
-										}
-									}
-									b.EndTransaction()
-									needsLayout = true
-
-								case tcell.KeyRune:
-									if ev.Rune() != 0 {
-										b.BeginTransaction()
-										b.DeleteSelection()
-										b.InsertTextWithRecord(b.cursor, string(ev.Rune()))
-										b.EndTransaction()
-										needsLayout = true
-									}
-						}
-						if isShift && b.isSelecting {
-							b.selection.End = b.cursor
-						}
+			case tcell.KeyRune:
+				if ev.Rune() != 0 {
+					b.BeginTransaction()
+					b.DeleteSelection()
+					b.InsertTextWithRecord(b.cursor, string(ev.Rune()))
+					b.EndTransaction()
+					needsLayout = true
+				}
+			}
+			if isShift && b.isSelecting {
+				b.selection.End = b.cursor
+			}
 		}
 	}
 }
