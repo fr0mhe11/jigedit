@@ -604,6 +604,7 @@ func (e *Editor) showEncodeActionMenu(x, y int) {
 	e.encodeMenuState = 1
 	e.encodeMenuTitle = " Select Action "
 	e.encodeMenuX, e.encodeMenuY = x, y
+	e.encodeMenuW, e.encodeMenuH = 0, 0
 	e.encodeMenuCursor = 0
 	e.encodeMenuItems = []PaletteItem{
 		{"저장될 인코딩 변경 (Set Save Encoding)...", "", func(e *Editor, s tcell.Screen) {
@@ -621,6 +622,7 @@ func (e *Editor) showEncodeRegionMenu() {
 	e.encodeMenuActive = true
 	e.encodeMenuState = 2
 	e.encodeMenuTitle = " Select Region "
+	e.encodeMenuW, e.encodeMenuH = 0, 0
 	e.encodeMenuCursor = 0
 	e.encodeMenuItems = []PaletteItem{
 		{"< 뒤로 가기 (Back)", "", func(e *Editor, s tcell.Screen) { e.showEncodeActionMenu(e.encodeMenuX, e.encodeMenuY) }},
@@ -639,6 +641,7 @@ func (e *Editor) showEncodeEncodingMenu() {
 	e.encodeMenuState = 3
 	group := encodingGroups[e.encodeRegionIdx]
 	e.encodeMenuTitle = " " + group.Region + " "
+	e.encodeMenuW, e.encodeMenuH = 0, 0
 	e.encodeMenuCursor = 0
 	e.encodeMenuItems = []PaletteItem{
 		{"< 뒤로 가기 (Back)", "", func(e *Editor, s tcell.Screen) { e.showEncodeRegionMenu() }},
@@ -1456,6 +1459,22 @@ func (b *Buffer) getSelectionRange() (Loc, Loc) {
 	return s, e
 }
 func (b *Buffer) HasSelection() bool { return b.selection.Start != b.selection.End }
+func (b *Buffer) isLocInSelection(loc Loc) bool {
+	if !b.HasSelection() {
+		return false
+	}
+	s, e := b.getSelectionRange()
+	if loc.L < s.L || loc.L > e.L {
+		return false
+	}
+	if loc.L == s.L && loc.C < s.C {
+		return false
+	}
+	if loc.L == e.L && loc.C > e.C {
+		return false
+	}
+	return true
+}
 func (b *Buffer) clearSelection() {
 	b.isSelecting = false
 	b.selection.Start = b.cursor
@@ -2663,26 +2682,56 @@ func (e *Editor) draw(s tcell.Screen) {
 		if title == " Command Palette " {
 			pX = (w - pWidth) / 2
 			pY = (h - pHeight) / 2
-		}
-		if pX < 0 {
-			pX = 0
-		}
-		if pY < 0 {
-			pY = 0
-		}
-		if pX+pWidth > w {
-			pX = w - pWidth
-		}
-		if pY+pHeight > h {
-			pY = h - pHeight
+		} else if *outW == 0 && *outH == 0 {
+			// 💡 컨텍스트 메뉴 및 인코딩 메뉴의 스마트 포지셔닝
+			// 클릭 지점(anchorX, anchorY) 기준 우측 아래(x+1, y+1)로 배치하되, 화면 경계를 넘어가면 반대 방향으로 뒤집음
+
+			// Y축: 아래쪽 공간이 충분하면 아래로(anchorY + 1), 부족하면 위로(anchorY - pHeight)
+			if anchorY+1+pHeight <= h-1 {
+				pY = anchorY + 1
+			} else {
+				pY = anchorY - pHeight
+				if pY < e.tabHeight { // 위로 올렸는데 탭 바를 넘어가면 아래쪽으로 붙임
+					pY = e.tabHeight
+				}
+			}
+
+			// X축: 오른쪽 공간이 충분하면 오른쪽으로(anchorX + 1), 부족하면 왼쪽으로(anchorX - pWidth)
+			if anchorX+1+pWidth <= w {
+				pX = anchorX + 1
+			} else {
+				pX = anchorX - pWidth
+				if pX < 0 { // 왼쪽으로 밀었는데 화면 밖으로 나가면 화면 왼쪽 끝(0)에 붙임
+					pX = 0
+				}
+			}
+		} else {
+			// 이미 계산된 위치가 있다면 화면 경계 밖으로 안 나가게 일반 클램핑만 수행
+			if pX < 0 {
+				pX = 0
+			}
+			if pY < 0 {
+				pY = 0
+			}
+			if pX+pWidth > w {
+				pX = w - pWidth
+			}
+			if pY+pHeight > h {
+				pY = h - pHeight
+			}
 		}
 		*outX, *outY, *outW, *outH = pX, pY, pWidth, pHeight
 
-		marginStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorDefault)
-		for y := -1; y <= pHeight; y++ {
-			for x := -1; x <= pWidth; x++ {
-				if pX+x >= 0 && pX+x < w && pY+y >= 0 && pY+y < h {
-					setCell(pX+x, pY+y, ' ', nil, marginStyle)
+		// 💡 [개선] 기존의 사방 1칸 공백(마진) 제거는 화면에 '구멍'을 뚫어 버그처럼 보이고 커서를 가렸습니다.
+		// 대신, 메뉴 왼쪽 경계(pX-1)에 한글 등 2칸 차지하는 더블바이트 문자가 있어 메뉴 안쪽(pX)으로
+		// 깨져서 침범(Bleeding)하는 현상만 정밀 조준하여 해당 칸만 공백으로 클리어해 줍니다.
+		for y := 0; y < pHeight; y++ {
+			ly := pY + y
+			lx := pX - 1
+			if lx >= 0 && lx < w && ly >= 0 && ly < h {
+				mainc, _, _, width := s.GetContent(lx, ly)
+				if width == 2 || runewidth.RuneWidth(mainc) == 2 {
+					setCell(lx, ly, ' ', nil, tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorDefault))
 				}
 			}
 		}
@@ -2784,7 +2833,9 @@ func (e *Editor) draw(s tcell.Screen) {
 				cx += runewidth.RuneWidth(r)
 			}
 		}
-		cursorVX = -1
+		if title == " Command Palette " {
+			cursorVX = -1
+		}
 	}
 
 	drawMenu(e.paletteActive, " Command Palette ", e.paletteItems, e.paletteCursor, 0, 0, &e.paletteX, &e.paletteY, &e.paletteW, &e.paletteH)
@@ -3533,7 +3584,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.2.3 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.2.4s - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -3748,9 +3799,22 @@ func main() {
 			}
 
 			if (buttons&tcell.Button3 != 0 || buttons&tcell.Button2 != 0) && !editor.paletteActive {
+				// 💡 우클릭 시 우클릭한 위치로 커서(I-빔) 이동
+				if my >= editor.tabHeight && my < h-1 {
+					loc := b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
+					// 💡 이미 선택된 영역 안을 우클릭한 것이라면 선택 영역을 유지하고,
+					// 그 외의 지역을 우클릭한 것이라면 선택 영역을 해제하고 커서를 이동함
+					if !b.isLocInSelection(loc) {
+						b.clearSelection()
+						b.cursor = loc
+					}
+				}
+
 				editor.ctxMenuActive = true
 				editor.ctxMenuX = mx
 				editor.ctxMenuY = my
+				editor.ctxMenuW = 0
+				editor.ctxMenuH = 0
 				editor.ctxMenuCursor = 0
 				editor.paletteActive = false
 				editor.encodeMenuActive = false
