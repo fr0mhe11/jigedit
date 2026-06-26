@@ -2337,13 +2337,13 @@ func (e *Editor) draw(s tcell.Screen) {
 					selected = true
 				}
 				if lineIdx == selStart.L && lineIdx == selEnd.L {
-					selected = i >= selStart.C && i < selEnd.C
+					selected = i >= selStart.C && i <= selEnd.C
 				}
 				if lineIdx == selStart.L && lineIdx < selEnd.L {
 					selected = i >= selStart.C
 				}
 				if lineIdx == selEnd.L && lineIdx > selStart.L {
-					selected = i < selEnd.C
+					selected = i <= selEnd.C
 				}
 				if selected {
 					if currentX >= b.hOffset && currentX < b.hOffset+textMaxWidth {
@@ -3584,7 +3584,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.2.4s - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.2.4 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
