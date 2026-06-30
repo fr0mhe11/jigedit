@@ -298,8 +298,9 @@ type VisualLine struct {
 }
 
 type MatchInfo struct {
-	loc      Loc
-	matchLen int
+	loc        Loc
+	matchLen   int
+	submatches []int
 }
 
 // 💡 2. Undo/Redo를 위한 초간단 Action 객체
@@ -360,6 +361,7 @@ type Buffer struct {
 	inputSelStart  int
 	inputSelEnd    int
 	isInputSelect  bool
+	inputHOffset   int
 
 	searchRegex bool
 	searchCase  bool
@@ -2534,23 +2536,92 @@ func (e *Editor) draw(s tcell.Screen) {
 		}
 
 		inputStartX := currentX
+		suffixW := runewidth.StringWidth(suffix)
+		inputBoxEnd := cbStartX - suffixW
+		if inputBoxEnd <= inputStartX {
+			inputBoxEnd = inputStartX + 5 // fail-safe
+		}
+
 		if targetStr != nil {
 			selStart, selEnd := b.inputSelStart, b.inputSelEnd
 			if selStart > selEnd {
 				selStart, selEnd = selEnd, selStart
 			}
 
+			totalW := runewidth.StringWidth(string(*targetStr))
+			cW := runewidth.StringWidth(string((*targetStr)[:b.inputCX]))
+			maxW := inputBoxEnd - inputStartX
+
+			for {
+				leftArrow := 0
+				if b.inputHOffset > 0 {
+					leftArrow = 1
+				}
+				rightArrow := 0
+				if totalW-b.inputHOffset > maxW-leftArrow {
+					rightArrow = 1
+				}
+				maxCursorW := maxW - 1 - leftArrow - rightArrow
+
+				if cW < b.inputHOffset {
+					b.inputHOffset = cW
+					continue
+				} else if cW-b.inputHOffset > maxCursorW {
+					b.inputHOffset = cW - maxCursorW
+					if b.inputHOffset < 0 {
+						b.inputHOffset = 0
+					}
+					continue
+				}
+				break
+			}
+
+			leftArrowVal := 0
+			if b.inputHOffset > 0 {
+				leftArrowVal = 1
+			}
+			rightArrow := totalW-b.inputHOffset > maxW-leftArrowVal
+
+			if leftArrowVal == 1 {
+				setCell(currentX, h-1, '<', nil, tcell.StyleDefault.Foreground(tcell.ColorYellow).Bold(true))
+				currentX++
+			}
+
+			limitX := inputBoxEnd
+			if rightArrow {
+				limitX = inputBoxEnd - 1
+			}
+
+			strW := 0
 			for i, r := range *targetStr {
+				rw := runewidth.RuneWidth(r)
 				style := statusStyle
 				if b.isInputSelect && i >= selStart && i < selEnd {
 					style = selectedStyle
 				}
-				if currentX < cbStartX {
+				
+				if strW >= b.inputHOffset && currentX < limitX {
+					if currentX+rw > limitX {
+						break
+					}
 					setCell(currentX, h-1, r, nil, style)
-					currentX += runewidth.RuneWidth(r)
+					currentX += rw
 				}
+				strW += rw
 			}
-			cursorVX = inputStartX + runewidth.StringWidth(string((*targetStr)[:b.inputCX]))
+
+			if rightArrow {
+				setCell(inputBoxEnd-1, h-1, '>', nil, tcell.StyleDefault.Foreground(tcell.ColorYellow).Bold(true))
+				currentX = inputBoxEnd
+			}
+
+			cursorVX = inputStartX + (cW - b.inputHOffset)
+			if leftArrowVal == 1 {
+				cursorVX++
+			}
+			if cursorVX >= inputBoxEnd {
+				cursorVX = inputBoxEnd - 1
+			}
 		} else {
 			cursorVX = -1
 		}
@@ -3104,6 +3175,40 @@ func (b *Buffer) findInitialMatchIdx(refLoc Loc, backwards bool) int {
 	return 0
 }
 
+// preprocessReplaceTemplate — replaceQuery 내의 \n, \t 리터럴을 실제 제어 문자로 변환
+func preprocessReplaceTemplate(replaceQuery []rune) (string, []byte) {
+	s := string(replaceQuery)
+	s = strings.ReplaceAll(s, `\n`, "\n")
+	s = strings.ReplaceAll(s, `\t`, "\t")
+	return s, []byte(s)
+}
+
+// getSearchRegex — searchRegex/searchWord/searchCase 옵션에 따라 정규식을 컴파일
+func (b *Buffer) getSearchRegex() *regexp.Regexp {
+	query := string(b.searchQuery)
+	if query == "" {
+		return nil
+	}
+	if !b.searchRegex && !b.searchWord {
+		return nil
+	}
+	pattern := query
+	if !b.searchRegex {
+		pattern = regexp.QuoteMeta(query)
+	}
+	if b.searchWord {
+		pattern = `\b` + pattern + `\b`
+	}
+	if !b.searchCase {
+		pattern = "(?i)" + pattern
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+	return compiled
+}
+
 // 💡 O(N) 전체 탐색을 버리고 커서 기준 위/아래 양방향(O(K))으로 뻗어나가는 극한 최적화 검색 엔진
 func (b *Buffer) findAllMatches(overlap bool) {
 	b.matches = []MatchInfo{}
@@ -3115,26 +3220,11 @@ func (b *Buffer) findAllMatches(overlap bool) {
 		return
 	}
 
-	var re *regexp.Regexp
-	if b.searchRegex || b.searchWord {
-		pattern := query
-		if !b.searchRegex {
-			pattern = regexp.QuoteMeta(query)
-		}
-		if b.searchWord {
-			pattern = `\b` + pattern + `\b`
-		}
-		if !b.searchCase {
-			pattern = "(?i)" + pattern
-		}
-		compiled, err := regexp.Compile(pattern)
-		if err == nil {
-			re = compiled
-		} else {
-			b.matches = nil
-			b.clearSelection()
-			return
-		}
+	re := b.getSearchRegex()
+	if re == nil && (b.searchRegex || b.searchWord) && query != "" {
+		b.matches = nil
+		b.clearSelection()
+		return
 	}
 
 	searchRunes := []rune(query)
@@ -3152,9 +3242,13 @@ func (b *Buffer) findAllMatches(overlap bool) {
 		var lineMatches []MatchInfo
 		lineData := b.lines[lineIdx]
 		if re != nil {
-			locs := re.FindAllIndex(lineData, limit)
-			for _, loc := range locs {
-				lineMatches = append(lineMatches, MatchInfo{loc: Loc{lineIdx, loc[0]}, matchLen: loc[1] - loc[0]})
+			locs := re.FindAllSubmatchIndex(lineData, limit)
+			for _, sloc := range locs {
+				lineMatches = append(lineMatches, MatchInfo{
+					loc:        Loc{lineIdx, sloc[0]},
+					matchLen:   sloc[1] - sloc[0],
+					submatches: sloc,
+				})
 			}
 		} else {
 			offset := 0
@@ -3278,9 +3372,19 @@ func (b *Buffer) replaceCurrent(overlap bool) {
 	}
 	m := b.matches[b.matchIdx]
 
+	templateStr, templateBytes := preprocessReplaceTemplate(b.replaceQuery)
+	replaceStr := templateStr
+
+	re := b.getSearchRegex()
+	if re != nil && len(m.submatches) > 0 {
+		lineData := b.lines[m.loc.L]
+		expanded := re.Expand(nil, templateBytes, lineData, m.submatches)
+		replaceStr = string(expanded)
+	}
+
 	b.BeginTransaction()
 	b.DeleteTextWithRecord(m.loc, Loc{m.loc.L, m.loc.C + m.matchLen})
-	b.InsertTextWithRecord(m.loc, string(b.replaceQuery))
+	b.InsertTextWithRecord(m.loc, replaceStr)
 	b.EndTransaction()
 
 	targetLoc := b.cursor
@@ -3590,7 +3694,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.2.5 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.2.6 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -3802,6 +3906,17 @@ func main() {
 				lastMouseButtons = buttons
 				isNewPress = (buttons&tcell.Button1 != 0) && (oldButtons&tcell.Button1 == 0)
 				isDrag = (buttons&tcell.Button1 != 0) && !isNewPress
+			}
+
+			if isNewPress {
+				now := time.Now()
+				if now.Sub(lastClickTime) < 400*time.Millisecond && mx == lastClickX && my == lastClickY {
+					clickCount++
+				} else {
+					clickCount = 1
+				}
+				lastClickTime = now
+				lastClickX, lastClickY = mx, my
 			}
 
 			if (buttons&tcell.Button3 != 0 || buttons&tcell.Button2 != 0) && !editor.paletteActive {
@@ -4056,24 +4171,122 @@ func main() {
 
 				if targetStr != nil {
 					prefixW := runewidth.StringWidth(prefix)
+					cbLen := 0
+					if !b.gotoMode {
+						cbLen = runewidth.StringWidth(" [ ] Regex  [ ] Case  [ ] Word ")
+					}
+					cbStartX := b.closeBtnStartX - cbLen
+
+					suffix := ""
+					if b.gotoMode {
+						suffix = "  (Enter: 이동, Esc: 취소)"
+					} else if !b.isReplace {
+						matchCountStr := "0/0"
+						if len(b.matches) > 0 {
+							totStr := fmt.Sprintf("%d", len(b.matches))
+							if b.searchCapped {
+								totStr += "+"
+							}
+							matchCountStr = fmt.Sprintf("%d/%s", b.matchIdx+1, totStr)
+						}
+						suffix = "  [" + matchCountStr + "] (Enter/Down:다음, Up:이전)"
+					}
+					suffixW := runewidth.StringWidth(suffix)
+					inputBoxEnd := cbStartX - suffixW
+					if inputBoxEnd <= prefixW {
+						inputBoxEnd = prefixW + 5
+					}
+
 					idx := 0
 					if mx >= prefixW {
-						currW := prefixW
+						leftArrow := 0
+						if b.inputHOffset > 0 {
+							leftArrow = 1
+						}
+						
+						strW := 0
+						visX := prefixW + leftArrow
 						for i, r := range *targetStr {
 							rw := runewidth.RuneWidth(r)
-							if mx >= currW && mx < currW+rw {
-								idx = i
-								break
+							if strW >= b.inputHOffset {
+								if visX >= inputBoxEnd-1 {
+									break
+								}
+								if mx < visX {
+									idx = i
+									break
+								}
+								if mx >= visX && mx < visX+rw {
+									idx = i
+									break
+								}
+								visX += rw
 							}
-							currW += rw
+							strW += rw
 							idx = i + 1
 						}
 					}
 					if isNewPress && my == h-1 {
-						b.inputCX = idx
-						b.isInputSelect = true
-						b.inputSelStart = idx
-						b.inputSelEnd = idx
+						if clickCount == 1 {
+							b.inputCX = idx
+							b.isInputSelect = true
+							b.inputSelStart = idx
+							b.inputSelEnd = idx
+						} else if clickCount == 2 {
+							b.inputCX = idx
+							if len(*targetStr) > 0 {
+								c := idx
+								if c >= len(*targetStr) {
+									c = len(*targetStr) - 1
+								}
+								if c >= 0 {
+									r := (*targetStr)[c]
+									isSp := unicode.IsSpace(r)
+									isAlpha := isWordChar(r)
+
+									left := c
+									for left > 0 {
+										pr := (*targetStr)[left-1]
+										if isSp {
+											if !unicode.IsSpace(pr) {
+												break
+											}
+										} else {
+											if unicode.IsSpace(pr) || isWordChar(pr) != isAlpha {
+												break
+											}
+										}
+										left--
+									}
+
+									right := c
+									for right < len(*targetStr) {
+										cr := (*targetStr)[right]
+										if isSp {
+											if !unicode.IsSpace(cr) {
+												break
+											}
+										} else {
+											if unicode.IsSpace(cr) || isWordChar(cr) != isAlpha {
+												break
+											}
+										}
+										right++
+									}
+
+									b.isInputSelect = true
+									b.inputSelStart = left
+									b.inputSelEnd = right
+									b.inputCX = right
+								}
+							}
+						} else if clickCount >= 3 {
+							b.isInputSelect = true
+							b.inputSelStart = 0
+							b.inputSelEnd = len(*targetStr)
+							b.inputCX = len(*targetStr)
+							clickCount = 0
+						}
 					} else if isDrag && b.isInputSelect {
 						b.inputCX = idx
 						b.inputSelEnd = idx
@@ -4301,15 +4514,7 @@ func main() {
 				}
 
 				if isNewPress {
-					now := time.Now()
-					if now.Sub(lastClickTime) < 400*time.Millisecond && mx == lastClickX && my == lastClickY {
-						clickCount++
-					} else {
-						clickCount = 1
-					}
-					lastClickTime = now
-					lastClickX, lastClickY = mx, my
-
+					b.isInputSelect = false // 💡 에디터를 직접 누르면 status/search input 선택 영역 해제
 					if clickCount == 1 {
 						if !b.isSelecting {
 							b.isSelecting = true
@@ -4715,8 +4920,15 @@ func main() {
 						needsLayout = true
 						continue
 					}
-					if ev.Key() == tcell.KeyCtrlC && hasSel {
-						clipboard.WriteAll(string((*targetStr)[selStart:selEnd]))
+					if ev.Key() == tcell.KeyCtrlC {
+						if hasSel {
+							clipboard.WriteAll(string((*targetStr)[selStart:selEnd]))
+						} else {
+							text := b.getSelectedText()
+							if text != "" {
+								_ = clipboard.WriteAll(text)
+							}
+						}
 						continue
 					}
 					if ev.Key() == tcell.KeyCtrlX && hasSel {
@@ -4885,12 +5097,27 @@ func main() {
 				if b.searchMode {
 					if ev.Key() == tcell.KeyCtrlA && b.isReplace && b.replaceStep == 3 {
 						if len(b.searchQuery) > 0 && len(b.matches) > 0 {
+							templateStr, templateBytes := preprocessReplaceTemplate(b.replaceQuery)
+							re := b.getSearchRegex()
 							b.BeginTransaction()
+							originalCursor := b.cursor
 							for i := len(b.matches) - 1; i >= 0; i-- {
 								m := b.matches[i]
+								replaceStr := templateStr
+								if re != nil && len(m.submatches) > 0 {
+									lineData := b.lines[m.loc.L]
+									expanded := re.Expand(nil, templateBytes, lineData, m.submatches)
+									replaceStr = string(expanded)
+								}
 								b.DeleteTextWithRecord(m.loc, Loc{m.loc.L, m.loc.C + m.matchLen})
-								b.InsertTextWithRecord(m.loc, string(b.replaceQuery))
+								b.InsertTextWithRecord(m.loc, replaceStr)
+								
+								// Adjust cursor to stay in place
+								if m.loc.L == originalCursor.L && m.loc.C <= originalCursor.C {
+									originalCursor.C += utf8.RuneCountInString(replaceStr) - m.matchLen
+								}
 							}
+							b.cursor = originalCursor
 							b.EndTransaction()
 							b.searchMode = false
 							b.isReplace = false
@@ -5067,7 +5294,7 @@ func main() {
 				switch ev.Key() {
 				case tcell.KeyCtrlA, tcell.KeyCtrlC, tcell.KeyCtrlS, tcell.KeyF12,
 					tcell.KeyCtrlP, tcell.KeyCtrlF, tcell.KeyCtrlR, tcell.KeyCtrlG,
-					tcell.KeyCtrlT, tcell.KeyCtrlW, tcell.KeyCtrlBackslash, tcell.KeyCtrlN:
+					tcell.KeyCtrlT, tcell.KeyCtrlW, tcell.KeyCtrlQ, tcell.KeyCtrlBackslash, tcell.KeyCtrlN:
 					snapToCursor = false
 				}
 				continue
