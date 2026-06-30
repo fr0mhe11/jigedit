@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -953,6 +956,8 @@ func loadFileLines(path string, forcedEncoding string) (lines [][]byte, encoding
 		lines = [][]byte{{}}
 	}
 
+	totalChars += len(lines) - 1
+
 	return lines, detectedEnc, totalChars, hash, endsWithNewline, nil
 }
 
@@ -1117,10 +1122,20 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 		return loc
 	}
 
-	// 💡 [해시 증분] 조작 전 원본 행의 해시를 전체 합에서 제거
-	b.currentHash ^= fnvHash(b.lines[loc.L])
+	b.totalChars += utf8.RuneCount(textBytes)
 
-	b.totalChars += utf8.RuneCount(textBytes) - bytes.Count(textBytes, []byte{'\n'})
+	// 🟢 [Phase 1-1] 빠른 경로: 개행 없는 단일 라인 삽입 — 재할당/머리복사 제거
+	if bytes.IndexByte(textBytes, '\n') < 0 {
+		b.currentHash ^= fnvHash(b.lines[loc.L]) // 삽입 전 원본 해시 제거
+		b.lines[loc.L] = slices.Insert(b.lines[loc.L], loc.C, textBytes...)
+		b.currentHash ^= fnvHash(b.lines[loc.L]) // 삽입 후 신 해시 주입
+		delete(b.vCache, loc.L)
+		return Loc{L: loc.L, C: loc.C + len(textBytes)}
+	}
+
+	// 다중라인 경로: 이하 코드는 \n 포함 텝스트에서만 실행됨
+	// 해시 증분: 조작 전 원본 행의 해시를 전체 합에서 제거
+	b.currentHash ^= fnvHash(b.lines[loc.L])
 
 	var newLines [][]byte
 	start := 0
@@ -1131,20 +1146,6 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 		}
 	}
 	newLines = append(newLines, append([]byte(nil), textBytes[start:]...))
-
-	if len(newLines) == 1 {
-		line := b.lines[loc.L]
-		newLine := make([]byte, 0, len(line)+len(newLines[0]))
-		newLine = append(newLine, line[:loc.C]...)
-		newLine = append(newLine, newLines[0]...)
-		newLine = append(newLine, line[loc.C:]...)
-		b.lines[loc.L] = newLine
-
-		// 💡 [해시 증분] 변경이 완료된 단일 행의 새 해시를 주입
-		b.currentHash ^= fnvHash(b.lines[loc.L])
-		delete(b.vCache, loc.L) // 💡 단일 라인만 선택적 무효화
-		return Loc{L: loc.L, C: loc.C + len(newLines[0])}
-	}
 
 	b.vCache = make(map[int][]VisualLine) // 💡 줄 바꿈 추가가 수반되므로 전체 캐시 무효화
 
@@ -1190,20 +1191,13 @@ func (b *Buffer) Remove(start, end Loc) string {
 	}
 
 	if start.L == end.L {
-		// 💡 [해시 증분] 조작 전 원본 행의 해시 제거
-		b.currentHash ^= fnvHash(b.lines[start.L])
-
 		line := b.lines[start.L]
-		deleted := string(line[start.C:end.C])
-		newLine := make([]byte, 0, len(line)-(end.C-start.C))
-		newLine = append(newLine, line[:start.C]...)
-		newLine = append(newLine, line[end.C:]...)
-		b.lines[start.L] = newLine
+		deleted := string(line[start.C:end.C]) // 🟢 [Phase 1-2] slices.Delete가 backing 덮기 전에 복사 — 순서 고정
+		b.currentHash ^= fnvHash(line)         // 삭제 전 원본 해시 제거
+		b.lines[start.L] = slices.Delete(line, start.C, end.C)
 		b.totalChars -= utf8.RuneCountInString(deleted)
-
-		// 💡 [해시 증분] 데이터가 잘려 나간 행의 새 해시 주입
-		b.currentHash ^= fnvHash(b.lines[start.L])
-		delete(b.vCache, start.L) // 💡 단일 라인만 선택적 무효화
+		b.currentHash ^= fnvHash(b.lines[start.L]) // 삭제 후 신 해시 주입
+		delete(b.vCache, start.L)
 		return deleted
 	}
 
@@ -1252,7 +1246,7 @@ func (b *Buffer) Remove(start, end Loc) string {
 	}
 
 	deletedStr := string(deletedBytes)
-	b.totalChars -= utf8.RuneCountInString(deletedStr) - (end.L - start.L)
+	b.totalChars -= utf8.RuneCountInString(deletedStr)
 	return deletedStr
 }
 
@@ -2327,6 +2321,11 @@ func (e *Editor) draw(s tcell.Screen) {
 			}
 			currentX += rw
 			i += size
+			// 🟢 [Phase 3-A] 가시영역 오른쪽을 완전히 벗어났고, 커서도 지났으면 중단
+			// 커서가 이 줄이면 반드시 커서 위치를 지난 뒤에만 break → cursorVX/VY 누락 없음
+			if currentX-b.hOffset >= textMaxWidth && (lineIdx != b.cursor.L || i > b.cursor.C) {
+				break
+			}
 		}
 
 		if !vl.isWrapped || vl.endCX == len(lineData) {
@@ -2596,6 +2595,7 @@ func (e *Editor) draw(s tcell.Screen) {
 					selChars += utf8.RuneCount(b.lines[idx])
 				}
 				selChars += utf8.RuneCount(b.lines[selEnd.L][:selEnd.C])
+				selChars += selEnd.L - selStart.L
 			}
 			charCountStr = fmt.Sprintf("%d Sel", selChars)
 		} else {
@@ -3566,6 +3566,12 @@ func (e *Editor) getActive() *Buffer {
 }
 
 func main() {
+	// 📊 [Phase 0] 측정 인프라: env 가드로 평시 오버헤드 0
+	// 사용법: JIGEDIT_PPROF=1 ./jigedit <파일>
+	// 프로파일: go tool pprof http://localhost:6060/debug/pprof/profile?seconds=10
+	if os.Getenv("JIGEDIT_PPROF") != "" {
+		go func() { _ = http.ListenAndServe("localhost:6060", nil) }()
+	}
 
 	// 💡 CLI 스테이트 머신 파서
 	var actions []StartupAction
@@ -3584,7 +3590,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.2.4 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.2.5 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
