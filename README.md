@@ -87,7 +87,7 @@ sudo dnf autoremove
 
 ## TODO
 - [x] extensive encoding support
-- [ ] multi cursor feature
+- [x] multi cursor feature
 
 
 - [ ] syntex highlighting
