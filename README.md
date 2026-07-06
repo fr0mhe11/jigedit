@@ -89,7 +89,7 @@ sudo dnf autoremove
 - [x] extensive encoding support
 - [x] multi cursor feature
 
-
+- [ ] make selection behave like micro/kwrite?
 - [ ] syntex highlighting
 - [ ] atomic file save
 
