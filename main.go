@@ -280,8 +280,9 @@ func fnvHash(b []byte) uint64 {
 
 // 💡 1. 절대 좌표 구조체 (이전의 Node 포인터를 완벽히 대체)
 type Loc struct {
-	L int // Line (0부터 시작)
-	C int // Column (0부터 시작)
+	L       int // Line (0부터 시작)
+	C       int // Column (0부터 시작)
+	TargetX int // ponytail: memory of target X for vertical movement
 }
 
 type Range struct {
@@ -309,6 +310,16 @@ type Action struct {
 	Start    Loc
 	End      Loc
 	Text     string
+	// Anchor is where THIS action's caret sat right before the edit. For an
+	// insert it's always Start, but for a delete it depends on direction
+	// (backspace's anchor is End, forward-delete's is Start), which can't be
+	// recovered from Start/End alone -- so it's captured at record time.
+	Anchor Loc
+	// IsPrimary marks whether this action belongs to the primary cursor
+	// (b.cursor) as opposed to one of the extra multi-cursors. Like micro,
+	// each edit is tagged to the specific caret that made it, rather than
+	// undo/redo snapshotting the whole cursor set.
+	IsPrimary bool
 }
 
 type Transaction struct {
@@ -352,6 +363,11 @@ type Buffer struct {
 	currentTx      *Transaction
 	txIDCounter    int64
 	savedTxID      int64
+	// nextActionIsExtra tells InsertTextWithRecord/DeleteTextWithRecord whether
+	// the caller is currently recording an edit for an extra (non-primary)
+	// cursor, so each Action can be tagged with the caret it belongs to. Zero
+	// value is false, matching the single-cursor default.
+	nextActionIsExtra bool
 
 	gotoMode       bool
 	gotoInput      []rune
@@ -397,6 +413,17 @@ type Buffer struct {
 	endsWithNewline bool // 💡 파일 끝 개행 보존용 플래그
 	savedModTime    time.Time
 	savedSize       int64
+
+	// ponytail: multi-cursor support
+	extraCursors []Loc // additional cursor positions (primary stays in b.cursor)
+	// extraSelAnchors holds each extra cursor's OWN selection anchor, index-
+	// aligned with extraCursors (extraSelAnchors[i] is the anchor for
+	// extraCursors[i]; that cursor's live position is its own selection's
+	// other end -- mirrors how b.selection.Start/b.cursor work for the
+	// primary). Only trusted when its length matches extraCursors; any
+	// mismatch (e.g. a cursor was added/removed mid-selection) is treated as
+	// "no extra selection" rather than read stale/misaligned data.
+	extraSelAnchors []Loc
 }
 type PaletteItem struct {
 	Name     string
@@ -776,7 +803,7 @@ func NewBuffer() *Buffer {
 	b := &Buffer{
 		lines:           [][]byte{{}},
 		vCache:          make(map[int][]VisualLine), // 💡 초기화
-		cursor:          Loc{L: 0, C: 0},
+		cursor:          Loc{L: 0, C: 0, TargetX: -1},
 		encoding:        "UTF-8",
 		dirtyStartL:     -1,        // 🟢 [추가됨] -1은 변경 사항 없음(Clean)을 의미
 		currentHash:     emptyHash, // 💡 초기화
@@ -1056,10 +1083,10 @@ func (b *Buffer) reloadFromLines(lines [][]byte, encoding string, totalChars int
 	if lastL >= 0 {
 		lastC = len(oldLines[lastL])
 	}
-	b.DeleteTextWithRecord(Loc{0, 0}, Loc{lastL, lastC})
+	b.DeleteTextWithRecord(Loc{L: 0, C: 0, TargetX: -1}, Loc{L: lastL, C: lastC, TargetX: -1})
 
 	newText := string(bytes.Join(lines, []byte{'\n'}))
-	b.InsertTextWithRecord(Loc{0, 0}, newText)
+	b.InsertTextWithRecord(Loc{L: 0, C: 0, TargetX: -1}, newText)
 	b.EndTransaction()
 
 	b.isReadOnly = wasReadOnly // 💡 원래 상태로 복구
@@ -1100,7 +1127,7 @@ func (b *Buffer) reopenWithEncoding(encName string) {
 	b.savedStrongHash = b.computeStrongHash()
 	b.isModified = false
 	b.lastExternalSync = time.Now()
-	b.cursor = Loc{0, 0}
+	b.cursor = Loc{L: 0, C: 0, TargetX: -1}
 	b.vOffsetL = 0
 	b.vOffsetSub = 0
 	b.hOffset = 0
@@ -1132,7 +1159,7 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 		b.lines[loc.L] = slices.Insert(b.lines[loc.L], loc.C, textBytes...)
 		b.currentHash ^= fnvHash(b.lines[loc.L]) // 삽입 후 신 해시 주입
 		delete(b.vCache, loc.L)
-		return Loc{L: loc.L, C: loc.C + len(textBytes)}
+		return Loc{L: loc.L, C: loc.C + len(textBytes), TargetX: -1}
 	}
 
 	// 다중라인 경로: 이하 코드는 \n 포함 텝스트에서만 실행됨
@@ -1176,7 +1203,7 @@ func (b *Buffer) Insert(loc Loc, text string) Loc {
 	copy(b.lines[loc.L+addLen+1:], b.lines[loc.L+1:])
 	copy(b.lines[loc.L+1:], newLines[1:])
 
-	return Loc{L: loc.L + len(newLines) - 1, C: len(newLines[len(newLines)-1]) - len(tail)}
+	return Loc{L: loc.L + len(newLines) - 1, C: len(newLines[len(newLines)-1]) - len(tail), TargetX: -1}
 }
 
 func (b *Buffer) Remove(start, end Loc) string {
@@ -1254,10 +1281,18 @@ func (b *Buffer) Remove(start, end Loc) string {
 
 // --- [ 4. 코어 논리 엔진 (Undo/Redo, Selection, Movement, VisualLine) ] ---
 
+// actionOverheadBytes approximates the fixed in-memory cost of one Action
+// struct (three Locs + a string header + two bools, rounded up for padding),
+// on top of its Text payload. Without this, a multi-cursor edit that emits one
+// Action per caret but very little text (e.g. N cursors each typing one char)
+// looks nearly free to the undo-memory cap while actually costing N times the
+// struct overhead.
+const actionOverheadBytes = 96
+
 func txBytes(tx Transaction) int {
 	sz := 0
 	for _, a := range tx.Actions {
-		sz += len(a.Text)
+		sz += len(a.Text) + actionOverheadBytes
 	}
 	return sz
 }
@@ -1265,9 +1300,53 @@ func txBytes(tx Transaction) int {
 // 💡 1. 절대 꼬이지 않는 초간단 Undo / Redo 시스템
 func (b *Buffer) BeginTransaction() {
 	if b.currentTx == nil {
-		b.currentTx = &Transaction{BeforeLoc: b.cursor}
+		b.currentTx = &Transaction{
+			BeforeLoc: b.cursor,
+		}
 	}
 }
+
+// mergeAction folds curr into *last following the single-cursor Undo/Redo merge
+// rules — word-wise insert, backspace deletion, and forward-delete deletion.
+// It returns whether the merge happened and how many text bytes were added.
+// Multi-cursor merging reuses this verbatim by applying it to each caret's
+// action pair, so a single cursor is simply the n == 1 case.
+func mergeAction(last *Action, curr Action) (ok bool, addedBytes int) {
+	if strings.Contains(curr.Text, "\n") || strings.Contains(last.Text, "\n") {
+		return false, 0
+	}
+
+	// 1. 연속 삽입(Insert) 묶기 (단어 단위로 — 공백에서 끊김)
+	if curr.IsInsert && last.IsInsert {
+		isSpaceCurr := curr.Text == " " || curr.Text == "\t"
+		isSpaceLast := strings.HasSuffix(last.Text, " ") || strings.HasSuffix(last.Text, "\t")
+		if !isSpaceCurr && !isSpaceLast && curr.Start == last.End {
+			last.Text += curr.Text
+			last.End = curr.End
+			return true, len(curr.Text)
+		}
+		return false, 0
+	}
+
+	// 2. 연속 삭제(Backspace / Delete) 묶기
+	if !curr.IsInsert && !last.IsInsert {
+		// 2-1. 백스페이스 방향 (현재 지운 범위의 끝이, 이전에 지운 범위의 시작점과 맞닿을 때)
+		if curr.End == last.Start {
+			last.Text = curr.Text + last.Text
+			last.Start = curr.Start
+			return true, len(curr.Text)
+		}
+		// 2-2. Delete 키 방향 (현재 지운 범위의 시작이, 이전에 지운 범위의 시작점과 같을 때)
+		if curr.Start == last.Start {
+			last.Text = last.Text + curr.Text
+			last.End = Loc{L: last.Start.L, C: last.Start.C + len(last.Text), TargetX: -1}
+			return true, len(curr.Text)
+		}
+	}
+
+	return false, 0
+}
+
 func (b *Buffer) EndTransaction() {
 	if b.currentTx != nil && len(b.currentTx.Actions) > 0 {
 		b.txIDCounter++
@@ -1275,70 +1354,42 @@ func (b *Buffer) EndTransaction() {
 		b.currentTx.AfterLoc = b.cursor
 		b.currentTx.Time = time.Now()
 
-		// 💡 부활한 스마트 Undo/Redo 병합(Merge) 로직!
-		if len(b.currentTx.Actions) == 1 && len(b.undoStack) > 0 {
+		// 💡 스마트 Undo/Redo 병합(Merge) — 단일 커서 규칙(mergeAction)을 커서 수만큼
+		// 짝지어 적용한다. 모든 커서의 액션이 병합 가능할 때만 트랜잭션을 병합하므로
+		// 단일 커서(n == 1)는 이 로직의 특수한 경우가 된다.
+		if len(b.undoStack) > 0 {
 			lastTx := &b.undoStack[len(b.undoStack)-1]
+			n := len(b.currentTx.Actions)
+			// 방금 저장된 상태(savedTxID)의 트랜잭션이면 병합을 거부한다.
+			if n == len(lastTx.Actions) &&
+				time.Since(lastTx.Time) < 1*time.Second &&
+				lastTx.ID != b.savedTxID {
 
-			if time.Since(lastTx.Time) < 1*time.Second && len(lastTx.Actions) == 1 {
-				// 💡 추가: 방금 저장된 상태의 트랜잭션이라면 병합을 거부함!
-				if lastTx.ID == b.savedTxID {
-					goto SKIP_MERGE
+				// 일부 커서만 병합되어 상태가 깨지는 일을 막기 위해 복사본에서 먼저 시도하고,
+				// 모든 액션이 병합될 때만 실제 트랜잭션에 반영한다.
+				trial := append([]Action(nil), lastTx.Actions...)
+				merged, added := true, 0
+				for i := 0; i < n; i++ {
+					ok, delta := mergeAction(&trial[i], b.currentTx.Actions[i])
+					if !ok {
+						merged = false
+						break
+					}
+					added += delta
 				}
-
-				currAct := b.currentTx.Actions[0]
-				lastAct := &lastTx.Actions[0]
-
-				// 1. 연속 삽입(Insert) 묶기 (단어 단위로)
-				if currAct.IsInsert && lastAct.IsInsert && !strings.Contains(currAct.Text, "\n") && !strings.Contains(lastAct.Text, "\n") {
-					isSpaceCurr := (currAct.Text == " " || currAct.Text == "\t")
-					isSpaceLast := strings.HasSuffix(lastAct.Text, " ") || strings.HasSuffix(lastAct.Text, "\t")
-
-					if !isSpaceCurr && !isSpaceLast {
-						if currAct.Start == lastAct.End {
-							lastAct.Text += currAct.Text
-							lastAct.End = currAct.End
-							lastTx.AfterLoc = b.cursor
-							lastTx.Time = b.currentTx.Time
-							b.redoStack = nil
-							b.currentTx = nil
-							b.checkModified()
-							b.totalUndoBytes += len(currAct.Text)
-							return
-						}
-					}
-				}
-
-				// 2. 연속 삭제(Backspace / Delete) 묶기
-				if !currAct.IsInsert && !lastAct.IsInsert && !strings.Contains(currAct.Text, "\n") && !strings.Contains(lastAct.Text, "\n") {
-					// 2-1. 백스페이스 방향 (현재 지운 범위의 끝이, 이전에 지운 범위의 시작점과 맞닿을 때)
-					if currAct.End == lastAct.Start {
-						lastAct.Text = currAct.Text + lastAct.Text
-						lastAct.Start = currAct.Start
-						lastTx.AfterLoc = b.cursor
-						lastTx.Time = b.currentTx.Time
-						b.redoStack = nil
-						b.currentTx = nil
-						b.checkModified()
-						b.totalUndoBytes += len(currAct.Text)
-						return
-					}
-					// 2-2. Delete 키 방향 (현재 지운 범위의 시작이, 이전에 지운 범위의 시작점과 같을 때)
-					if currAct.Start == lastAct.Start {
-						lastAct.Text = lastAct.Text + currAct.Text
-						lastAct.End = Loc{L: lastAct.Start.L, C: lastAct.Start.C + len(lastAct.Text)}
-						lastTx.AfterLoc = b.cursor
-						lastTx.Time = b.currentTx.Time
-						b.redoStack = nil
-						b.currentTx = nil
-						b.checkModified()
-						b.totalUndoBytes += len(currAct.Text)
-						return
-					}
+				if merged {
+					lastTx.Actions = trial
+					lastTx.AfterLoc = b.cursor
+					lastTx.Time = b.currentTx.Time
+					b.redoStack = nil
+					b.currentTx = nil
+					b.checkModified()
+					b.totalUndoBytes += added
+					return
 				}
 			}
 		}
 
-	SKIP_MERGE:
 		b.undoStack = append(b.undoStack, *b.currentTx)
 		b.totalUndoBytes += txBytes(*b.currentTx)
 		b.redoStack = nil
@@ -1377,7 +1428,10 @@ func (b *Buffer) InsertTextWithRecord(loc Loc, text string) {
 	}
 	endLoc := b.Insert(loc, text)
 	if b.currentTx != nil {
-		b.currentTx.Actions = append(b.currentTx.Actions, Action{IsInsert: true, Start: loc, End: endLoc, Text: text})
+		b.currentTx.Actions = append(b.currentTx.Actions, Action{
+			IsInsert: true, Start: loc, End: endLoc, Text: text,
+			Anchor: loc, IsPrimary: !b.nextActionIsExtra,
+		})
 	}
 	b.cursor = endLoc
 }
@@ -1385,24 +1439,75 @@ func (b *Buffer) DeleteTextWithRecord(start, end Loc) {
 	if b.isReadOnly {
 		return
 	}
+	anchor := b.cursor // caret position for this specific caret right before the delete
 	text := b.Remove(start, end)
 	if text != "" && b.currentTx != nil {
-		b.currentTx.Actions = append(b.currentTx.Actions, Action{IsInsert: false, Start: start, End: end, Text: text})
+		b.currentTx.Actions = append(b.currentTx.Actions, Action{
+			IsInsert: false, Start: start, End: end, Text: text,
+			Anchor: anchor, IsPrimary: !b.nextActionIsExtra,
+		})
 	}
 	b.cursor = start
 }
+
+// DeleteSelection deletes the primary selection and, if any extra cursors
+// carry their own independent selection (see extraSelAnchors), each of
+// those too -- in one bottom-to-top pass so deleting a lower one never
+// invalidates a not-yet-processed higher one's byte offsets.
 func (b *Buffer) DeleteSelection() bool {
-	if b.isReadOnly || !b.HasSelection() {
+	if b.isReadOnly {
 		return false
 	}
-	start, end := b.getSelectionRange()
-	start = b.clampLoc(start) // 🟢 [추가] 삭제 시 좌표 이중 보정
-	end = b.clampLoc(end)     // 🟢 [추가] 삭제 시 좌표 이중 보정
-	if start == end {
+	hasPrimary := b.HasSelection()
+	anchorFor := map[Loc]Loc{}
+	if len(b.extraSelAnchors) == len(b.extraCursors) {
+		for i, ec := range b.extraCursors {
+			if b.extraSelAnchors[i] != ec {
+				anchorFor[ec] = b.extraSelAnchors[i]
+			}
+		}
+	}
+
+	if len(anchorFor) == 0 {
+		// No extra cursor has a selection of its own: exactly the original
+		// single-selection path, unchanged, so behavior without this feature
+		// in play is byte-for-byte identical to before it existed.
+		if !hasPrimary {
+			return false
+		}
+		start, end := b.getSelectionRange()
+		start = b.clampLoc(start) // 🟢 [추가] 삭제 시 좌표 이중 보정
+		end = b.clampLoc(end)     // 🟢 [추가] 삭제 시 좌표 이중 보정
+		if start == end {
+			b.clearSelection()
+			return false
+		}
+		b.DeleteTextWithRecord(start, end)
+		for i := range b.extraCursors {
+			b.extraCursors[i] = shiftLocForDelete(b.extraCursors[i], start, end)
+		}
 		b.clearSelection()
-		return false
+		return true
 	}
-	b.DeleteTextWithRecord(start, end)
+
+	var primaryStart, primaryEnd Loc
+	if hasPrimary {
+		primaryStart, primaryEnd = b.getSelectionRange()
+		primaryStart = b.clampLoc(primaryStart)
+		primaryEnd = b.clampLoc(primaryEnd)
+	}
+	b.runMultiCursorDelete(func(loc Loc, isPrimary bool) (Loc, Loc) {
+		if isPrimary {
+			if hasPrimary && primaryStart != primaryEnd {
+				return primaryStart, primaryEnd
+			}
+			return loc, loc // primary has no selection: no-op for this caret
+		}
+		if anchor, ok := anchorFor[loc]; ok {
+			return normalizeRange(anchor, loc)
+		}
+		return loc, loc // this extra caret has no selection: no-op
+	})
 	b.clearSelection()
 	return true
 }
@@ -1422,6 +1527,7 @@ func (b *Buffer) Undo() {
 		}
 	}
 	b.cursor = b.clampLoc(tx.BeforeLoc)
+	b.restoreExtraCursorsFromActions(tx.Actions, undoCaretFor)
 	b.redoStack = append(b.redoStack, tx)
 	b.checkModified()
 	b.clearSelection()
@@ -1440,10 +1546,62 @@ func (b *Buffer) Redo() {
 		}
 	}
 	b.cursor = b.clampLoc(tx.AfterLoc)
+	b.restoreExtraCursorsFromActions(tx.Actions, redoCaretFor)
 	b.undoStack = append(b.undoStack, tx)
 	b.totalUndoBytes += txBytes(tx)
 	b.checkModified()
 	b.clearSelection()
+}
+
+// undoCaretFor returns where a specific caret should land after reversing act.
+func undoCaretFor(act Action) Loc {
+	if act.IsInsert {
+		return act.Start
+	}
+	return act.Anchor
+}
+
+// redoCaretFor returns where a specific caret should land after re-applying act.
+func redoCaretFor(act Action) Loc {
+	if act.IsInsert {
+		return act.End
+	}
+	return act.Start
+}
+
+// restoreExtraCursorsFromActions repositions the currently-live extra cursors
+// using this transaction's own non-primary actions -- there is no separate
+// snapshot of "the cursor set" to fall back on, matching micro, where each
+// edit is tagged to the caret that made it rather than the whole cursor set
+// being captured at undo boundaries.
+//
+// If the live extra-cursor count no longer matches the number of non-primary
+// actions (e.g. the user dismissed multi-cursor mode with Escape, or added/
+// removed cursors since this edit), the mapping from actions to cursors is no
+// longer meaningful, so the live set is left untouched instead of resurrecting
+// stale carets or clobbering unrelated ones.
+func (b *Buffer) restoreExtraCursorsFromActions(actions []Action, caretFor func(Action) Loc) {
+	var extras []Loc
+	for _, act := range actions {
+		if !act.IsPrimary {
+			extras = append(extras, caretFor(act))
+		}
+	}
+	if len(extras) == 0 || len(extras) != len(b.extraCursors) {
+		// Can't confidently map this transaction's actions to the live
+		// cursors, so leave their POSITIONS alone rather than resurrecting
+		// dismissed carets or clobbering unrelated ones. But the undo/redo
+		// that just ran may have changed the buffer's shape (removed lines,
+		// shortened a line), and cleanExtraCursors clamps each one back onto
+		// valid bounds -- skipping this left stale carets pointing past the
+		// end of the buffer, silently failing to render ("disappearing"),
+		// only resurfacing at a clamped-but-unintended spot the next time an
+		// edit ran them through Insert/Remove's own clampLoc.
+		b.cleanExtraCursors()
+		return
+	}
+	b.extraCursors = extras
+	b.cleanExtraCursors()
 }
 
 // 💡 2. 절대 좌표 기반 선택(Selection) 조작 로직
@@ -1454,7 +1612,10 @@ func (b *Buffer) getSelectionRange() (Loc, Loc) {
 	}
 	return s, e
 }
-func (b *Buffer) HasSelection() bool { return b.selection.Start != b.selection.End }
+func (b *Buffer) HasSelection() bool {
+	s, e := b.selection.Start, b.selection.End
+	return s.L != e.L || s.C != e.C
+}
 func (b *Buffer) isLocInSelection(loc Loc) bool {
 	if !b.HasSelection() {
 		return false
@@ -1475,18 +1636,19 @@ func (b *Buffer) clearSelection() {
 	b.isSelecting = false
 	b.selection.Start = b.cursor
 	b.selection.End = b.cursor
+	b.extraSelAnchors = nil
 }
 func (b *Buffer) selectAll() {
 	b.isSelecting = true
-	b.selection.Start = Loc{0, 0}
-	b.selection.End = Loc{len(b.lines) - 1, len(b.lines[len(b.lines)-1])}
+	b.selection.Start = Loc{L: 0, C: 0, TargetX: -1}
+	b.selection.End = Loc{L: len(b.lines) - 1, C: len(b.lines[len(b.lines)-1]), TargetX: -1}
 	b.cursor = b.selection.End
 }
-func (b *Buffer) getSelectedText() string {
-	if !b.HasSelection() {
-		return ""
-	}
-	s, e := b.getSelectionRange()
+
+// sliceText returns the buffer content spanning [s, e). Shared by
+// getSelectedText and getMultiSelectedText so both build an identical
+// multi-line join.
+func (b *Buffer) sliceText(s, e Loc) string {
 	s = b.clampLoc(s) // 🟢 [추가] 복사 시 좌표 이중 보정
 	e = b.clampLoc(e) // 🟢 [추가] 복사 시 좌표 이중 보정
 	if s.L == e.L {
@@ -1501,6 +1663,79 @@ func (b *Buffer) getSelectedText() string {
 	}
 	sb.Write(b.lines[e.L][:e.C])
 	return sb.String()
+}
+func (b *Buffer) getSelectedText() string {
+	if !b.HasSelection() {
+		return ""
+	}
+	s, e := b.getSelectionRange()
+	return b.sliceText(s, e)
+}
+
+// getMultiSelectedText gathers the text of every active selection -- the
+// primary's and each extra cursor's own (extraSelAnchors) -- in ascending
+// document order, joined by "\n". This is CodeMirror 6's copy/cut
+// convention: N selections become N newline-joined pieces, which paste's
+// byLine distribution (cursorRankMap) can later split back across N cursors.
+// A cursor with no selection of its own contributes nothing (matching CM6:
+// only non-empty ranges are collected). Degenerates to exactly
+// getSelectedText()'s result when there is at most one selection, so
+// existing single-selection copy/cut is unchanged.
+func (b *Buffer) getMultiSelectedText() string {
+	type piece struct {
+		loc  Loc
+		text string
+	}
+	var pieces []piece
+	if b.HasSelection() {
+		s, e := b.getSelectionRange()
+		pieces = append(pieces, piece{loc: s, text: b.sliceText(s, e)})
+	}
+	if len(b.extraSelAnchors) == len(b.extraCursors) {
+		for i, ec := range b.extraCursors {
+			anchor := b.extraSelAnchors[i]
+			if anchor == ec {
+				continue
+			}
+			s, e := normalizeRange(anchor, ec)
+			pieces = append(pieces, piece{loc: s, text: b.sliceText(s, e)})
+		}
+	}
+	if len(pieces) == 0 {
+		return ""
+	}
+	if len(pieces) == 1 {
+		return pieces[0].text
+	}
+	// ascending sort by start position (insertion sort: selection count is tiny)
+	for i := 1; i < len(pieces); i++ {
+		x := pieces[i]
+		j := i - 1
+		for j >= 0 && (pieces[j].loc.L > x.loc.L || (pieces[j].loc.L == x.loc.L && pieces[j].loc.C > x.loc.C)) {
+			pieces[j+1] = pieces[j]
+			j--
+		}
+		pieces[j+1] = x
+	}
+	parts := make([]string, len(pieces))
+	for i, p := range pieces {
+		parts[i] = p.text
+	}
+	return strings.Join(parts, "\n")
+}
+
+// cursorRankMap gives each live caret's 0-based rank in ascending document
+// order (primary + extras). Paste uses this to pair each caret with "its"
+// line when the clipboard was copied from the same number of selections --
+// CodeMirror 6's "byLine" paste distribution.
+func (b *Buffer) cursorRankMap() map[Loc]int {
+	all, _ := b.allCursorsSortedDesc()
+	n := len(all)
+	rank := make(map[Loc]int, n)
+	for i, loc := range all {
+		rank[loc] = n - 1 - i
+	}
+	return rank
 }
 func isWordChar(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' }
 func (b *Buffer) selectWordAtCursor() {
@@ -1549,18 +1784,464 @@ func (b *Buffer) selectWordAtCursor() {
 		right += csize
 	}
 	b.isSelecting = true
-	b.selection.Start = Loc{b.cursor.L, left}
-	b.selection.End = Loc{b.cursor.L, right}
+	b.selection.Start = Loc{L: b.cursor.L, C: left, TargetX: -1}
+	b.selection.End = Loc{L: b.cursor.L, C: right, TargetX: -1}
 	b.cursor = b.selection.End
 }
 func (b *Buffer) selectLineAtCursor() {
 	b.isSelecting = true
-	b.selection.Start = Loc{b.cursor.L, 0}
-	b.selection.End = Loc{b.cursor.L, len(b.lines[b.cursor.L])}
+	b.selection.Start = Loc{L: b.cursor.L, C: 0, TargetX: -1}
+	b.selection.End = Loc{L: b.cursor.L, C: len(b.lines[b.cursor.L]), TargetX: -1}
 	b.cursor = b.selection.End
 }
 
-// 💡 3. 배열 인덱스 기반의 이동(Movement) 로직
+// ponytail: multi-cursor helpers
+
+// cleanExtraCursors removes duplicates and entries equal to the primary cursor.
+// Keeps extras sorted ascending by (L, C).
+// cursorDistance is a coarse line-dominant distance used only to pick the
+// "nearest" cursor -- exact metric doesn't matter, just that same-line beats
+// any other line.
+func cursorDistance(a, b Loc) int {
+	dl := a.L - b.L
+	if dl < 0 {
+		dl = -dl
+	}
+	dc := a.C - b.C
+	if dc < 0 {
+		dc = -dc
+	}
+	return dl*1_000_000 + dc
+}
+
+// removeCursorAt handles Ctrl+Click landing on an existing caret: clicking an
+// extra cursor removes it (like micro's Ctrl+MouseLeft toggling a cursor
+// off). Clicking the primary cursor can't simply delete it -- there must
+// always be exactly one primary -- so instead the primary jumps to the
+// nearest remaining cursor, and that cursor is absorbed.
+// Returns false if loc doesn't match any existing caret, so the caller can
+// fall back to adding a brand new cursor there.
+func (b *Buffer) removeCursorAt(loc Loc) bool {
+	for i, ec := range b.extraCursors {
+		if ec.L == loc.L && ec.C == loc.C {
+			b.extraCursors = append(b.extraCursors[:i], b.extraCursors[i+1:]...)
+			return true
+		}
+	}
+	if b.cursor.L == loc.L && b.cursor.C == loc.C && len(b.extraCursors) > 0 {
+		nearest := 0
+		best := -1
+		for i, ec := range b.extraCursors {
+			if d := cursorDistance(b.cursor, ec); best == -1 || d < best {
+				best, nearest = d, i
+			}
+		}
+		b.cursor = b.extraCursors[nearest]
+		b.extraCursors = append(b.extraCursors[:nearest], b.extraCursors[nearest+1:]...)
+		return true
+	}
+	return false
+}
+
+func (b *Buffer) cleanExtraCursors() {
+	if len(b.extraCursors) == 0 {
+		return
+	}
+	// sort ascending. Insertion sort rather than sort.Slice: cursor counts are
+	// tiny and this runs on every multi-cursor edit/move, while sort.Slice's
+	// reflection path allocates a boxed slice + swapper every call.
+	ec := b.extraCursors
+	for i := 1; i < len(ec); i++ {
+		x := ec[i]
+		j := i - 1
+		for j >= 0 && (ec[j].L > x.L || (ec[j].L == x.L && ec[j].C > x.C)) {
+			ec[j+1] = ec[j]
+			j--
+		}
+		ec[j+1] = x
+	}
+
+	sameCaret := func(a, b Loc) bool {
+		return a.L == b.L && a.C == b.C
+	}
+
+	// deduplicate and remove any matching primary cursor
+	out := make([]Loc, 0, len(b.extraCursors))
+	var prev Loc
+	hasPrev := false
+	for _, ec := range b.extraCursors {
+		ec = b.clampLoc(ec)
+		if sameCaret(ec, b.cursor) {
+			continue
+		}
+		if hasPrev && sameCaret(ec, prev) {
+			continue
+		}
+		out = append(out, ec)
+		prev = ec
+		hasPrev = true
+	}
+	b.extraCursors = out
+}
+
+// allCursorsSortedDesc returns all cursors sorted descending, and the index of the primary cursor.
+// Editing bottom-to-top keeps upper-cursor byte offsets valid.
+func (b *Buffer) allCursorsSortedDesc() ([]Loc, int) {
+	type cursorWithIdx struct {
+		loc       Loc
+		isPrimary bool
+	}
+	all := make([]cursorWithIdx, 0, 1+len(b.extraCursors))
+	all = append(all, cursorWithIdx{b.cursor, true})
+	for _, ec := range b.extraCursors {
+		all = append(all, cursorWithIdx{ec, false})
+	}
+	// sort descending by (L, C). Insertion sort avoids sort.Slice's per-call
+	// reflection allocation; the cursor set is small.
+	for i := 1; i < len(all); i++ {
+		x := all[i]
+		j := i - 1
+		for j >= 0 && (all[j].loc.L < x.loc.L || (all[j].loc.L == x.loc.L && all[j].loc.C < x.loc.C)) {
+			all[j+1] = all[j]
+			j--
+		}
+		all[j+1] = x
+	}
+
+	locs := make([]Loc, len(all))
+	primaryIdx := 0
+	for i, c := range all {
+		locs[i] = c.loc
+		if c.isPrimary {
+			primaryIdx = i
+		}
+	}
+	return locs, primaryIdx
+}
+
+// setCursorsFromDesc writes back an edited descending cursor list, preserving the primary cursor.
+// cleanExtraCursors is called at the end to remove any extra cursor that has
+// collapsed onto another cursor (e.g. when a backspace at column 0 merges two
+// lines and two carets end up at the same position).
+func (b *Buffer) setCursorsFromDesc(all []Loc, primaryIdx int) {
+	if len(all) == 0 {
+		return
+	}
+	if primaryIdx >= 0 && primaryIdx < len(all) {
+		b.cursor = all[primaryIdx]
+	} else {
+		b.cursor = all[len(all)-1]
+	}
+	b.extraCursors = make([]Loc, 0, len(all)-1)
+	// extras: all except primary, stored ascending
+	for i := len(all) - 1; i >= 0; i-- {
+		if i == primaryIdx {
+			continue
+		}
+		b.extraCursors = append(b.extraCursors, all[i])
+	}
+	// Drop any extra cursor that has collapsed onto the primary or onto
+	// another extra cursor (happens when a delete merges two lines and two
+	// carets land at the same byte position).
+	b.cleanExtraCursors()
+}
+
+// shiftLocForInsert maps a caret position q forward across an insertion that
+// filled the span from loc to end. Positions before loc are untouched; the
+// insertion point and everything after it slides by the inserted text's size.
+//
+// This is what a bottom-to-top multi-cursor edit must apply to the carets it has
+// ALREADY processed: those carets sit at higher offsets than the current edit,
+// and an insertion at a lower offset on the SAME line shifts their byte offsets.
+// Without this, a recorded offset goes stale by however many bytes were inserted
+// below it, and the next keystroke inserts mid-rune — splitting a multi-byte
+// character into �� garbage.
+func shiftLocForInsert(q, loc, end Loc) Loc {
+	if q.L < loc.L || (q.L == loc.L && q.C < loc.C) {
+		return q // strictly before the insertion point
+	}
+	lineDelta := end.L - loc.L
+	if q.L == loc.L { // q.C >= loc.C: on the insertion line, at/after the point
+		if lineDelta == 0 {
+			q.C += end.C - loc.C
+		} else {
+			q.C = end.C + (q.C - loc.C)
+			q.L += lineDelta
+		}
+	} else { // q on a later line: only its line index shifts
+		q.L += lineDelta
+	}
+	q.TargetX = -1
+	return q
+}
+
+// shiftLocForDelete maps a caret position q backward across a deletion of the
+// span [start, end). It is the delete-side counterpart to shiftLocForInsert and
+// serves the same purpose for multi-cursor backspace/delete.
+func shiftLocForDelete(q, start, end Loc) Loc {
+	if q.L < start.L || (q.L == start.L && q.C <= start.C) {
+		return q // at or before the removed span
+	}
+	if q.L < end.L || (q.L == end.L && q.C <= end.C) {
+		return Loc{L: start.L, C: start.C, TargetX: -1} // inside the removed span
+	}
+	if q.L == end.L { // on end's line, past it: merges onto start's line
+		q.C = start.C + (q.C - end.C)
+		q.L = start.L
+	} else { // on a later line
+		q.L -= end.L - start.L
+	}
+	q.TargetX = -1
+	return q
+}
+
+// normalizeRange orders s/e so s is the earlier position, matching
+// getSelectionRange's swap-if-backwards convention. Used wherever a caret's
+// own (anchor, live position) pair needs to become a renderable/deletable
+// [start, end) range, since the live position can be on either side of the
+// anchor depending on which direction the selection was extended.
+func normalizeRange(s, e Loc) (Loc, Loc) {
+	if s.L > e.L || (s.L == e.L && s.C > e.C) {
+		return e, s
+	}
+	return s, e
+}
+
+// cellInSelRange reports whether the character at (lineIdx, col) -- col being
+// a byte offset into that physical line -- falls inside a selection spanning
+// [s, e). Shared by the primary selection's render highlighting and the
+// per-extra-cursor selection highlighting so both use identical cell-boundary
+// rules.
+func cellInSelRange(lineIdx, col int, s, e Loc) bool {
+	if lineIdx > s.L && lineIdx < e.L {
+		return true
+	}
+	if lineIdx == s.L && lineIdx == e.L {
+		return col >= s.C && col < e.C
+	}
+	if lineIdx == s.L && lineIdx < e.L {
+		return col >= s.C
+	}
+	if lineIdx == e.L && lineIdx > s.L {
+		return col < e.C
+	}
+	return false
+}
+
+// adjustCursorsAfterInsert rewrites every caret in all for an insertion that ran
+// at index self (filling loc..end). The editing caret lands on end; every other
+// caret is transformed so same-line carets above the edit stay on rune
+// boundaries.
+func adjustCursorsAfterInsert(all []Loc, self int, loc, end Loc) {
+	for j := range all {
+		if j == self {
+			all[j] = end
+		} else {
+			all[j] = shiftLocForInsert(all[j], loc, end)
+		}
+	}
+}
+
+// adjustCursorsAfterDelete is the delete-side counterpart to
+// adjustCursorsAfterInsert; the editing caret lands on start.
+func adjustCursorsAfterDelete(all []Loc, self int, start, end Loc) {
+	for j := range all {
+		if j == self {
+			all[j] = start
+		} else {
+			all[j] = shiftLocForDelete(all[j], start, end)
+		}
+	}
+}
+
+// runMultiCursorInsert and runMultiCursorDelete are the ONE shared bottom-to-top
+// dance every multi-cursor-aware Insert/Delete key handler must go through.
+// They exist so that adding a new multi-cursor feature (Ctrl+Backspace,
+// multi-cursor Tab, paste, ...) only requires supplying what to insert/delete
+// at each caret -- the caller can no longer forget the position-rebase step
+// that caused the mojibake bug (a caret already edited this keystroke going
+// stale when a later same-line edit landed at a lower offset, eventually
+// splitting a multi-byte rune).
+//
+// This does NOT touch Insert/Remove or Undo/Redo: those are replayed directly
+// by Undo()/Redo() using each transaction's own recorded Actions, and already
+// have their own correct-by-construction cursor restoration
+// (restoreExtraCursorsFromActions) that deliberately does NOT resurrect
+// dismissed cursors. Rebasing at that lower level would fire on every replayed
+// action and fight with that restoration.
+func (b *Buffer) runMultiCursorInsert(textFor func(loc Loc, isPrimary bool) string) {
+	// Fast path: with no extra cursors this is just a single-cursor insert.
+	// InsertTextWithRecord already jumps b.cursor to the insertion end, which is
+	// exactly what the sort/adjust/write-back dance below produces for one
+	// caret -- so skip that machinery (allCursorsSortedDesc's sort + slice
+	// allocations run on every keystroke otherwise, the common case).
+	if len(b.extraCursors) == 0 {
+		b.nextActionIsExtra = false
+		b.InsertTextWithRecord(b.cursor, textFor(b.cursor, true))
+		return
+	}
+	all, primaryIdx := b.allCursorsSortedDesc()
+	for i, c := range all {
+		b.cursor = c
+		b.nextActionIsExtra = i != primaryIdx
+		b.InsertTextWithRecord(b.cursor, textFor(c, i == primaryIdx))
+		adjustCursorsAfterInsert(all, i, c, b.cursor)
+	}
+	b.nextActionIsExtra = false
+	b.setCursorsFromDesc(all, primaryIdx)
+}
+
+func (b *Buffer) runMultiCursorDelete(rangeFor func(loc Loc, isPrimary bool) (start, end Loc)) {
+	// Fast path: see runMultiCursorInsert. DeleteTextWithRecord jumps b.cursor to
+	// the deletion start, matching the single-caret result of the loop below.
+	if len(b.extraCursors) == 0 {
+		b.nextActionIsExtra = false
+		start, end := rangeFor(b.cursor, true)
+		b.DeleteTextWithRecord(start, end)
+		return
+	}
+	all, primaryIdx := b.allCursorsSortedDesc()
+	for i, c := range all {
+		b.cursor = c
+		b.nextActionIsExtra = i != primaryIdx
+		start, end := rangeFor(c, i == primaryIdx)
+		b.DeleteTextWithRecord(start, end)
+		adjustCursorsAfterDelete(all, i, start, end)
+	}
+	b.nextActionIsExtra = false
+	b.setCursorsFromDesc(all, primaryIdx)
+}
+
+// runMultiCursorDedent removes up to tabSize of leading whitespace (or a
+// single leading tab) once per DISTINCT line touched by a live caret. Unlike
+// insert/delete, dedent is inherently a per-LINE operation, not a per-caret
+// one: two carets sharing a line must not have that line's indentation
+// stripped twice, so this can't reuse runMultiCursorDelete's one-edit-per-
+// caret loop.
+//
+// Because one dedent action may need to represent more than one extra caret
+// (when several share a line), it doesn't fit the transaction model's
+// one-action-per-caret assumption that undo uses to restore extra-cursor
+// positions (restoreExtraCursorsFromActions). Content undo is always exact;
+// if extra carets shared a dedented line, their columns after undoing a
+// dedent may not perfectly revert -- a narrow, accepted trade-off rather than
+// a content-correctness bug.
+func (b *Buffer) runMultiCursorDedent(tabSize int) {
+	primary := b.cursor
+	extras := append([]Loc(nil), b.extraCursors...)
+
+	lineSet := map[int]bool{primary.L: true}
+	for _, ec := range extras {
+		lineSet[ec.L] = true
+	}
+	lines := make([]int, 0, len(lineSet))
+	for l := range lineSet {
+		lines = append(lines, l)
+	}
+	sort.Ints(lines)
+
+	for _, r := range lines {
+		line := b.lines[r]
+		if len(line) == 0 {
+			continue
+		}
+		removeCount := 0
+		if line[0] == '\t' {
+			removeCount = 1
+		} else {
+			for removeCount < len(line) && removeCount < tabSize && line[removeCount] == ' ' {
+				removeCount++
+			}
+		}
+		if removeCount == 0 {
+			continue
+		}
+		b.nextActionIsExtra = primary.L != r
+		b.DeleteTextWithRecord(Loc{L: r, C: 0, TargetX: -1}, Loc{L: r, C: removeCount, TargetX: -1})
+
+		if primary.L == r {
+			primary.C -= removeCount
+			if primary.C < 0 {
+				primary.C = 0
+			}
+		}
+		for i := range extras {
+			if extras[i].L == r {
+				extras[i].C -= removeCount
+				if extras[i].C < 0 {
+					extras[i].C = 0
+				}
+			}
+		}
+	}
+	b.nextActionIsExtra = false
+	b.cursor = primary
+	b.extraCursors = extras
+}
+
+// runMultiCursorMove runs move once for the primary cursor, then once more for
+// each extra cursor (temporarily aliasing b.cursor to it so the closure's own
+// b.cursor-reading logic -- word/paragraph movement, soft-wrap sub-line
+// lookup, TargetX threading -- applies identically to every caret).
+//
+// Every movement key (Left/Right/Up/Down/PgUp/PgDn/Home/End) used to hand-roll
+// this as "move the primary, then copy-paste the same logic into a loop over
+// extraCursors" -- the same duplication pattern the edit handlers had before
+// they were unified onto runMultiCursorInsert/Delete. This is the movement-side
+// equivalent: with zero extra cursors it degenerates to a single move() call,
+// so there's no separate single-cursor code path.
+func (b *Buffer) runMultiCursorMove(move func()) {
+	move()
+	for i := range b.extraCursors {
+		saved := b.cursor
+		b.cursor = b.extraCursors[i]
+		move()
+		b.extraCursors[i] = b.cursor
+		b.cursor = saved
+	}
+	if len(b.extraCursors) > 0 {
+		b.cleanExtraCursors()
+	}
+}
+
+// addCursorAbove adds a new caret one visual line above the topmost existing
+// caret (primary or extra), so repeated presses keep walking upward instead
+// of always measuring from the (unmoved) primary cursor.
+func (b *Buffer) addCursorAbove(cfg Config) {
+	origCursor := b.cursor
+	origExtras := append([]Loc(nil), b.extraCursors...)
+	all, _ := b.allCursorsSortedDesc() // descending: last entry is topmost (smallest L)
+	top := all[len(all)-1]
+
+	b.cursor = top
+	tx := top.TargetX
+	b.moveCursorVisualLine(-1, cfg, &tx)
+	newCaret := b.cursor
+	newCaret.TargetX = tx
+
+	b.cursor = origCursor
+	b.extraCursors = append(origExtras, newCaret)
+	b.cleanExtraCursors()
+}
+
+// addCursorBelow mirrors addCursorAbove, extending from the bottommost caret.
+func (b *Buffer) addCursorBelow(cfg Config) {
+	origCursor := b.cursor
+	origExtras := append([]Loc(nil), b.extraCursors...)
+	all, _ := b.allCursorsSortedDesc() // descending: first entry is bottommost (largest L)
+	bottom := all[0]
+
+	b.cursor = bottom
+	tx := bottom.TargetX
+	b.moveCursorVisualLine(1, cfg, &tx)
+	newCaret := b.cursor
+	newCaret.TargetX = tx
+
+	b.cursor = origCursor
+	b.extraCursors = append(origExtras, newCaret)
+	b.cleanExtraCursors()
+}
+
 func (b *Buffer) moveWordLeft() {
 	if b.cursor.C == 0 {
 		if b.cursor.L > 0 {
@@ -1863,7 +2544,7 @@ func (b *Buffer) scrollToCursorH(textMaxWidth int, cfg Config) {
 func (b *Buffer) screenToMemoryPosV(mx, my, tabHeight int, cfg Config) Loc {
 	lineNumWidth := b.getLineNumWidth(cfg)
 	if len(b.lines) == 0 {
-		return Loc{0, 0}
+		return Loc{L: 0, C: 0, TargetX: -1}
 	}
 
 	relativeY := my - tabHeight
@@ -1895,7 +2576,7 @@ func (b *Buffer) screenToMemoryPosV(mx, my, tabHeight int, cfg Config) Loc {
 	b.ensureVCache(currL, cfg)
 	subLines := b.vCache[currL]
 	if len(subLines) == 0 {
-		return Loc{currL, 0}
+		return Loc{L: currL, C: 0, TargetX: -1}
 	}
 	if currSub >= len(subLines) {
 		currSub = len(subLines) - 1
@@ -1925,7 +2606,7 @@ func (b *Buffer) screenToMemoryPosV(mx, my, tabHeight int, cfg Config) Loc {
 
 	relativeX := mx - lineNumWidth + b.hOffset
 	if relativeX <= 0 {
-		return Loc{currL, safeStart}
+		return Loc{L: currL, C: safeStart, TargetX: -1}
 	}
 
 	currentX := 0
@@ -1946,19 +2627,19 @@ func (b *Buffer) screenToMemoryPosV(mx, my, tabHeight int, cfg Config) Loc {
 				if nextPos > len(line) {
 					nextPos = len(line)
 				}
-				return Loc{currL, nextPos}
+				return Loc{L: currL, C: nextPos, TargetX: -1}
 			}
-			return Loc{currL, i}
+			return Loc{L: currL, C: i, TargetX: -1}
 		}
 		currentX += rw
 		i += size
 	}
 
-	return Loc{currL, safeEnd}
+	return Loc{L: currL, C: safeEnd, TargetX: -1}
 }
 
 // 🟢 [추가] 위/아래(Up/Down/PgUp/PgDn) 키를 눌렀을 때, 누적합 없이 인접 가상라인으로 커서를 안전하게 옮기는 O(1) 헬퍼
-func (b *Buffer) moveCursorVisualLine(delta int, cfg Config) {
+func (b *Buffer) moveCursorVisualLine(delta int, cfg Config, targetX *int) {
 	b.cursor = b.clampLoc(b.cursor)
 	cursorSub := b.getCursorSub(cfg)
 	b.ensureVCache(b.cursor.L, cfg)
@@ -1966,11 +2647,18 @@ func (b *Buffer) moveCursorVisualLine(delta int, cfg Config) {
 
 	// 💡 1. 현재 커서의 시각적 X 오프셋 계산 (바이트가 아닌 화면 칸 수 기준)
 	visualOffset := 0
-	currLineData := b.lines[b.cursor.L]
-	for i := currentVL.startCX; i < b.cursor.C && i < currentVL.endCX && i < len(currLineData); {
-		r, size := utf8.DecodeRune(currLineData[i:])
-		visualOffset += fastRuneWidth(r, cfg.TabSize)
-		i += size
+	if targetX != nil && *targetX != -1 {
+		visualOffset = *targetX
+	} else {
+		currLineData := b.lines[b.cursor.L]
+		for i := currentVL.startCX; i < b.cursor.C && i < currentVL.endCX && i < len(currLineData); {
+			r, size := utf8.DecodeRune(currLineData[i:])
+			visualOffset += fastRuneWidth(r, cfg.TabSize)
+			i += size
+		}
+		if targetX != nil {
+			*targetX = visualOffset
+		}
 	}
 
 	currL := b.cursor.L
@@ -1986,6 +2674,9 @@ func (b *Buffer) moveCursorVisualLine(delta int, cfg Config) {
 				currL = 0
 				currSub = 0
 				visualOffset = 0
+				if targetX != nil {
+					*targetX = 0
+				}
 				break
 			}
 		}
@@ -2003,6 +2694,9 @@ func (b *Buffer) moveCursorVisualLine(delta int, cfg Config) {
 				b.ensureVCache(currL, cfg)
 				currSub = len(b.vCache[currL]) - 1
 				visualOffset = 999999 // 끝으로 강제 정렬
+				if targetX != nil {
+					*targetX = 999999
+				}
 				break
 			}
 		}
@@ -2097,7 +2791,7 @@ func (e *Editor) draw(s tcell.Screen) {
 		e.encodeMenuActive || e.prevEncode ||
 		e.promptMode || e.prevPrompt ||
 		b.searchMode || e.prevSearch ||
-		b.gotoMode || e.prevGoto || len(b.lines) != e.prevLinesLen {
+		b.gotoMode || e.prevGoto || len(b.lines) != e.prevLinesLen || len(b.extraCursors) > 0 {
 		forceAllDirty = true
 	} else {
 		if b.totalChars == e.prevTotalChars && b.txIDCounter == e.prevTxID {
@@ -2175,6 +2869,10 @@ func (e *Editor) draw(s tcell.Screen) {
 	selStart = b.clampLoc(selStart) // 🟢 선택 영역 좌표 보정
 	selEnd = b.clampLoc(selEnd)     // 🟢 선택 영역 좌표 보정
 	hasSel := b.HasSelection()
+	// ponytail: each extra cursor can carry its own independent
+	// selection (extraSelAnchors, index-aligned with extraCursors).
+	// Only trusted when the counts match -- see the field's doc comment.
+	hasExtraSel := len(b.extraSelAnchors) == len(b.extraCursors) && len(b.extraSelAnchors) > 0
 
 	// 🟢 [변경] 누적합 대신, 오프셋 줄부터 한 줄씩 증가하며 화면 높이만큼만 렌더링
 	currL := b.vOffsetL
@@ -2264,6 +2962,17 @@ func (e *Editor) draw(s tcell.Screen) {
 			cursorVX = lineNumWidth - b.hOffset
 			cursorVY = currentRenderY
 		}
+		// ponytail: render extra cursors on empty lines
+		if len(lineData) == 0 && len(b.extraCursors) > 0 {
+			for _, ec := range b.extraCursors {
+				if ec.L == lineIdx {
+					ex := lineNumWidth - b.hOffset
+					if ex >= lineNumWidth && ex < w {
+						setCell(ex, currentRenderY, ' ', nil, tcell.StyleDefault.Reverse(true))
+					}
+				}
+			}
+		}
 
 		for i := vl.startCX; i < vl.endCX; {
 			r, size := utf8.DecodeRune(lineData[i:])
@@ -2286,22 +2995,33 @@ func (e *Editor) draw(s tcell.Screen) {
 				}
 			}
 
-			if hasSel {
-				selected := false
-				if lineIdx > selStart.L && lineIdx < selEnd.L {
-					selected = true
+			if hasSel && cellInSelRange(lineIdx, i, selStart, selEnd) {
+				charStyle = selectedStyle
+			}
+
+			// ponytail: extra-cursor selection highlighting -- each extra
+			// caret can carry its own independent selection.
+			if hasExtraSel {
+				for k, ec := range b.extraCursors {
+					anchor := b.extraSelAnchors[k]
+					if anchor == ec {
+						continue
+					}
+					es, ee := normalizeRange(anchor, ec)
+					if cellInSelRange(lineIdx, i, es, ee) {
+						charStyle = selectedStyle
+						break
+					}
 				}
-				if lineIdx == selStart.L && lineIdx == selEnd.L {
-					selected = i >= selStart.C && i < selEnd.C
-				}
-				if lineIdx == selStart.L && lineIdx < selEnd.L {
-					selected = i >= selStart.C
-				}
-				if lineIdx == selEnd.L && lineIdx > selStart.L {
-					selected = i < selEnd.C
-				}
-				if selected {
-					charStyle = selectedStyle
+			}
+
+			// ponytail: extra cursor rendering — reverse-video block
+			if len(b.extraCursors) > 0 {
+				for _, ec := range b.extraCursors {
+					if ec.L == lineIdx && ec.C == i {
+						charStyle = charStyle.Reverse(true)
+						break
+					}
 				}
 			}
 
@@ -2325,7 +3045,14 @@ func (e *Editor) draw(s tcell.Screen) {
 			i += size
 			// 🟢 [Phase 3-A] 가시영역 오른쪽을 완전히 벗어났고, 커서도 지났으면 중단
 			// 커서가 이 줄이면 반드시 커서 위치를 지난 뒤에만 break → cursorVX/VY 누락 없음
-			if currentX-b.hOffset >= textMaxWidth && (lineIdx != b.cursor.L || i > b.cursor.C) {
+			hasExtraOnLine := false
+			for _, ec := range b.extraCursors {
+				if ec.L == lineIdx && ec.C >= i {
+					hasExtraOnLine = true
+					break
+				}
+			}
+			if currentX-b.hOffset >= textMaxWidth && (lineIdx != b.cursor.L || i > b.cursor.C) && !hasExtraOnLine {
 				break
 			}
 		}
@@ -2358,6 +3085,20 @@ func (e *Editor) draw(s tcell.Screen) {
 			if b.cursor.C == len(lineData) || currSub+1 >= len(vcls) || b.stickToWrapEnd { // 🟢 vIdx 불필요
 				cursorVX = lineNumWidth + currentX - b.hOffset
 				cursorVY = currentRenderY
+			}
+		}
+
+		// ponytail: render extra cursors at end-of-line
+		if len(b.extraCursors) > 0 {
+			for _, ec := range b.extraCursors {
+				if ec.L == lineIdx && ec.C == vl.endCX {
+					if ec.C == len(lineData) || currSub+1 >= len(vcls) {
+						ex := lineNumWidth + currentX - b.hOffset
+						if ex >= lineNumWidth && ex < w {
+							setCell(ex, currentRenderY, ' ', nil, tcell.StyleDefault.Reverse(true))
+						}
+					}
+				}
 			}
 		}
 
@@ -2419,21 +3160,21 @@ func (e *Editor) draw(s tcell.Screen) {
 	if e.promptMode {
 		var promptMsg string
 		if e.promptType == "quit" {
-			promptMsg = " [Warning] 저장되지 않은 탭이 있습니다. 무시하고 종료할까요? (y/n)"
+			promptMsg = " [Warning] 저장되지 않은 탭이 있습니다. 무시하고 종료할까요? [Y/n]"
 		} else if e.promptType == "close" {
-			promptMsg = " [Warning] 변경된 내용이 있습니다. 탭을 닫을까요? (y/n)"
+			promptMsg = " [Warning] 변경된 내용이 있습니다. 탭을 닫을까요? [Y/n]"
 		} else if e.promptType == "reset_config" {
-			promptMsg = " [Warning] 설정을 기본값으로 초기화하시겠습니까? (y/n)"
+			promptMsg = " [Warning] 설정을 기본값으로 초기화하시겠습니까? [Y/n]"
 		} else if e.promptType == "reopen" {
-			promptMsg = " [Warning] 변경된 내용이 있습니다. 무시하고 다시 열까요? (y/n)"
+			promptMsg = " [Warning] 변경된 내용이 있습니다. 무시하고 다시 열까요? [Y/n]"
 		} else if e.promptType == "close_config" {
-			promptMsg = " [Warning] 설정이 저장되지 않았습니다. 무시하고 닫을까요? (y/n)"
+			promptMsg = " [Warning] 설정이 저장되지 않았습니다. 무시하고 닫을까요? [Y/n]"
 		} else if e.promptType == "external_change" {
 			fileName := ""
 			if e.targetCloseBuffer >= 0 && e.targetCloseBuffer < len(e.buffers) {
 				fileName = filepath.Base(e.buffers[e.targetCloseBuffer].filePath)
 			}
-			promptMsg = fmt.Sprintf(" [Warning] '%s' 파일이 외부에서 변경되었습니다. 디스크 내용으로 덮어쓸까요? (y/n)", fileName)
+			promptMsg = fmt.Sprintf(" [Warning] '%s' 파일이 외부에서 변경되었습니다. 디스크 내용으로 덮어쓸까요? [Y/n]", fileName)
 		} else if e.promptType == "alert" {
 			promptMsg = " [Alert] " + e.alertMessage + " (Enter/Esc)"
 		}
@@ -2599,7 +3340,7 @@ func (e *Editor) draw(s tcell.Screen) {
 				if b.isInputSelect && i >= selStart && i < selEnd {
 					style = selectedStyle
 				}
-				
+
 				if strW >= b.inputHOffset && currentX < limitX {
 					if currentX+rw > limitX {
 						break
@@ -3245,7 +3986,7 @@ func (b *Buffer) findAllMatches(overlap bool) {
 			locs := re.FindAllSubmatchIndex(lineData, limit)
 			for _, sloc := range locs {
 				lineMatches = append(lineMatches, MatchInfo{
-					loc:        Loc{lineIdx, sloc[0]},
+					loc:        Loc{L: lineIdx, C: sloc[0], TargetX: -1},
 					matchLen:   sloc[1] - sloc[0],
 					submatches: sloc,
 				})
@@ -3276,7 +4017,7 @@ func (b *Buffer) findAllMatches(overlap bool) {
 				}
 				if match {
 					matchLen := currentByteOffset - offset
-					lineMatches = append(lineMatches, MatchInfo{loc: Loc{lineIdx, offset}, matchLen: matchLen})
+					lineMatches = append(lineMatches, MatchInfo{loc: Loc{L: lineIdx, C: offset, TargetX: -1}, matchLen: matchLen})
 					if !overlap {
 						offset = currentByteOffset
 					} else {
@@ -3363,7 +4104,7 @@ func (b *Buffer) jumpToMatch() {
 	b.cursor = m.loc
 	b.isSelecting = true
 	b.selection.Start = m.loc
-	b.selection.End = Loc{m.loc.L, m.loc.C + m.matchLen}
+	b.selection.End = Loc{L: m.loc.L, C: m.loc.C + m.matchLen, TargetX: -1}
 }
 
 func (b *Buffer) replaceCurrent(overlap bool) {
@@ -3383,7 +4124,7 @@ func (b *Buffer) replaceCurrent(overlap bool) {
 	}
 
 	b.BeginTransaction()
-	b.DeleteTextWithRecord(m.loc, Loc{m.loc.L, m.loc.C + m.matchLen})
+	b.DeleteTextWithRecord(m.loc, Loc{L: m.loc.L, C: m.loc.C + m.matchLen, TargetX: -1})
 	b.InsertTextWithRecord(m.loc, replaceStr)
 	b.EndTransaction()
 
@@ -3448,7 +4189,9 @@ var ActionMap = map[tcell.Key]EditorAction{
 	tcell.KeyCtrlZ: func(e *Editor, s tcell.Screen) { e.getActive().Undo() },
 	tcell.KeyCtrlY: func(e *Editor, s tcell.Screen) { e.getActive().Redo() },
 	tcell.KeyCtrlC: func(e *Editor, s tcell.Screen) {
-		text := e.getActive().getSelectedText()
+		// ponytail(CM6): copy every live selection (primary + each extra
+		// cursor's own), not just the primary's -- see getMultiSelectedText.
+		text := e.getActive().getMultiSelectedText()
 		if text != "" {
 			_ = clipboard.WriteAll(text)
 		}
@@ -3458,7 +4201,7 @@ var ActionMap = map[tcell.Key]EditorAction{
 		if b.isReadOnly {
 			return
 		}
-		text := b.getSelectedText()
+		text := b.getMultiSelectedText()
 		if text != "" {
 			_ = clipboard.WriteAll(text)
 			b.BeginTransaction()
@@ -3473,10 +4216,24 @@ var ActionMap = map[tcell.Key]EditorAction{
 		}
 		text, err := clipboard.ReadAll()
 		if err == nil && text != "" {
+			text = strings.ReplaceAll(text, "\r\n", "\n")
 			b.BeginTransaction()
 			b.DeleteSelection()
-			text = strings.ReplaceAll(text, "\r\n", "\n")
-			b.InsertTextWithRecord(b.cursor, text)
+			// ponytail(CM6): if the clipboard splits into exactly one line per
+			// live caret, give each caret its own line (in document order)
+			// instead of pasting the whole blob at every caret -- mirrors
+			// CodeMirror 6's "byLine" paste, the round-trip counterpart of
+			// copying from N selections (getMultiSelectedText). Any other line
+			// count falls back to the old "same text everywhere" paste, which
+			// is also CM6's own fallback for a non-matching line count.
+			cursorCount := 1 + len(b.extraCursors)
+			parts := strings.Split(text, "\n")
+			if cursorCount > 1 && len(parts) == cursorCount {
+				rank := b.cursorRankMap()
+				b.runMultiCursorInsert(func(loc Loc, _ bool) string { return parts[rank[loc]] })
+			} else {
+				b.runMultiCursorInsert(func(Loc, bool) string { return text })
+			}
 			b.EndTransaction()
 		}
 	},
@@ -3694,7 +4451,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.2.6 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.3.0 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -3890,6 +4647,13 @@ func main() {
 				}
 			}
 		case *tcell.EventMouse:
+			// ponytail: reset horizontal target memory on mouse interaction
+			b := editor.getActive()
+			b.cursor.TargetX = -1
+			for i := range b.extraCursors {
+				b.extraCursors[i].TargetX = -1
+			}
+
 			mx, my := ev.Position()
 			mouseMoved := (editor.mouseX != mx || editor.mouseY != my)
 			editor.mouseX = mx
@@ -4203,7 +4967,7 @@ func main() {
 						if b.inputHOffset > 0 {
 							leftArrow = 1
 						}
-						
+
 						strW := 0
 						visX := prefixW + leftArrow
 						for i, r := range *targetStr {
@@ -4513,6 +5277,30 @@ func main() {
 					continue
 				}
 
+				// ponytail: Ctrl+Click toggles a cursor -- adds one, unless loc
+				// already has a caret on it, in which case that caret is removed.
+				// Like micro, holding Ctrl blocks the drag entirely: only the
+				// initial press does anything, and any drag/move while Ctrl is
+				// still held is ignored instead of falling through into normal
+				// text-selection dragging (which produced garbled selections).
+				if (ev.Modifiers() & tcell.ModCtrl) != 0 {
+					if isNewPress {
+						if !b.removeCursorAt(loc) {
+							b.extraCursors = append(b.extraCursors, loc)
+							b.cleanExtraCursors()
+						}
+						editor.needsFullRefresh = true
+						needsLayout = true
+					}
+					continue
+				}
+
+				// ponytail: any plain click clears extra cursors
+				if isNewPress && len(b.extraCursors) > 0 {
+					b.extraCursors = nil
+					editor.needsFullRefresh = true
+				}
+
 				if isNewPress {
 					b.isInputSelect = false // 💡 에디터를 직접 누르면 status/search input 선택 영역 해제
 					if clickCount == 1 {
@@ -4531,6 +5319,7 @@ func main() {
 						clickCount = 0
 					}
 				} else {
+
 					// 💡 마우스가 완벽히 멈춰있을 때는 더블/트리플 클릭 선택 영역을 취소하지 않음!
 					if mx != lastClickX || my != lastClickY {
 						b.selection.End = loc
@@ -4576,6 +5365,16 @@ func main() {
 				}
 			}
 		case *tcell.EventKey:
+			// ponytail: reset horizontal target memory on any key EXCEPT vertical movement
+			b := editor.getActive()
+			k := ev.Key()
+			if k != tcell.KeyUp && k != tcell.KeyDown && k != tcell.KeyPgUp && k != tcell.KeyPgDn {
+				b.cursor.TargetX = -1
+				for i := range b.extraCursors {
+					b.extraCursors[i].TargetX = -1
+				}
+			}
+
 			isCtrl := (ev.Modifiers() & tcell.ModCtrl) != 0
 			isShift := (ev.Modifiers() & tcell.ModShift) != 0
 			isAlt := (ev.Modifiers() & tcell.ModAlt) != 0
@@ -4622,7 +5421,7 @@ func main() {
 						}
 					}
 					needsLayout = true
-				} else if ev.Rune() == 'y' || ev.Rune() == 'Y' {
+				} else if ev.Key() == tcell.KeyEnter || ev.Rune() == 'y' || ev.Rune() == 'Y' {
 					editor.promptMode = false
 
 					// 💡 큐를 진행하기 전에 현재 타겟 탭을 캡처합니다.
@@ -5109,9 +5908,9 @@ func main() {
 									expanded := re.Expand(nil, templateBytes, lineData, m.submatches)
 									replaceStr = string(expanded)
 								}
-								b.DeleteTextWithRecord(m.loc, Loc{m.loc.L, m.loc.C + m.matchLen})
+								b.DeleteTextWithRecord(m.loc, Loc{L: m.loc.L, C: m.loc.C + m.matchLen, TargetX: -1})
 								b.InsertTextWithRecord(m.loc, replaceStr)
-								
+
 								// Adjust cursor to stay in place
 								if m.loc.L == originalCursor.L && m.loc.C <= originalCursor.C {
 									originalCursor.C += utf8.RuneCountInString(replaceStr) - m.matchLen
@@ -5248,15 +6047,28 @@ func main() {
 				}
 			}
 
+			// ponytail: Ctrl+Alt+Up/Down — add cursor above/below
+			if isCtrl && isAlt && ev.Key() == tcell.KeyUp {
+				b.addCursorAbove(editor.cfg)
+				needsLayout = true
+				continue
+			}
+			if isCtrl && isAlt && ev.Key() == tcell.KeyDown {
+				b.addCursorBelow(editor.cfg)
+				needsLayout = true
+				continue
+			}
+
 			if isAlt && ev.Key() == tcell.KeyUp {
+
 				if b.cursor.L > 0 {
 					oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
 					b.BeginTransaction()
 					currStr := string(b.lines[oldL])
 					prevStr := string(b.lines[oldL-1])
-					b.DeleteTextWithRecord(Loc{oldL - 1, 0}, Loc{oldL, len(b.lines[oldL])})
-					b.InsertTextWithRecord(Loc{oldL - 1, 0}, currStr+"\n"+prevStr)
-					b.cursor = b.clampLoc(Loc{oldL - 1, oldC}) // 💡 절대 에러 방지
+					b.DeleteTextWithRecord(Loc{L: oldL - 1, C: 0, TargetX: -1}, Loc{L: oldL, C: len(b.lines[oldL]), TargetX: -1})
+					b.InsertTextWithRecord(Loc{L: oldL - 1, C: 0, TargetX: -1}, currStr+"\n"+prevStr)
+					b.cursor = b.clampLoc(Loc{L: oldL - 1, C: oldC, TargetX: -1}) // 💡 절대 에러 방지
 					b.EndTransaction()
 					needsLayout = true
 				}
@@ -5268,9 +6080,9 @@ func main() {
 					b.BeginTransaction()
 					currStr := string(b.lines[oldL])
 					nextStr := string(b.lines[oldL+1])
-					b.DeleteTextWithRecord(Loc{oldL, 0}, Loc{oldL + 1, len(b.lines[oldL+1])})
-					b.InsertTextWithRecord(Loc{oldL, 0}, nextStr+"\n"+currStr)
-					b.cursor = b.clampLoc(Loc{oldL + 1, oldC}) // 💡 절대 에러 방지
+					b.DeleteTextWithRecord(Loc{L: oldL, C: 0, TargetX: -1}, Loc{L: oldL + 1, C: len(b.lines[oldL+1]), TargetX: -1})
+					b.InsertTextWithRecord(Loc{L: oldL, C: 0, TargetX: -1}, nextStr+"\n"+currStr)
+					b.cursor = b.clampLoc(Loc{L: oldL + 1, C: oldC, TargetX: -1}) // 💡 절대 에러 방지
 					b.EndTransaction()
 					needsLayout = true
 				}
@@ -5283,6 +6095,13 @@ func main() {
 					if !b.isSelecting {
 						b.isSelecting = true
 						b.selection.Start = b.cursor
+						// ponytail: snapshot every extra cursor's pre-move position
+						// as its own selection anchor, so Shift+move extends each
+						// caret's selection independently, mirroring how
+						// selection.Start anchors the primary.
+						if len(b.extraCursors) > 0 {
+							b.extraSelAnchors = append([]Loc(nil), b.extraCursors...)
+						}
 					}
 				}
 			}
@@ -5303,145 +6122,191 @@ func main() {
 			switch ev.Key() {
 			case tcell.KeyTab, tcell.KeyBacktab:
 				b.BeginTransaction()
-				s, e := b.getSelectionRange()
 				hasSel := b.HasSelection()
-				if !hasSel {
-					s = b.cursor
-					e = b.cursor
-				}
-				oldCursor := b.cursor
 
-				if isShift || ev.Key() == tcell.KeyBacktab {
-					for r := s.L; r <= e.L; r++ {
-						line := b.lines[r]
-						if len(line) > 0 {
-							removeCount := 0
-							if line[0] == '\t' {
-								removeCount = 1
-							} else {
-								for removeCount < len(line) && removeCount < editor.cfg.TabSize && line[removeCount] == ' ' {
-									removeCount++
-								}
-							}
-							if removeCount > 0 {
-								b.DeleteTextWithRecord(Loc{r, 0}, Loc{r, removeCount})
-								if r == oldCursor.L {
-									oldCursor.C -= removeCount
-									if oldCursor.C < 0 {
-										oldCursor.C = 0
-									}
-								}
-								if hasSel {
-									if r == s.L {
-										s.C -= removeCount
-										if s.C < 0 {
-											s.C = 0
-										}
-									}
-									if r == e.L {
-										e.C -= removeCount
-										if e.C < 0 {
-											e.C = 0
-										}
-									}
-								}
-							}
+				if !hasSel {
+					// ponytail: cursor-count-agnostic point-caret path --
+					// degenerates to the old single-cursor Tab/Shift+Tab when
+					// there are no extra cursors. Selections still take the
+					// separate branch below since only the primary can carry
+					// one (Buffer.selection is singular, primary-only).
+					if isShift || ev.Key() == tcell.KeyBacktab {
+						b.runMultiCursorDedent(editor.cfg.TabSize)
+					} else {
+						var indentStr string
+						if editor.cfg.ExpandTab {
+							indentStr = strings.Repeat(" ", editor.cfg.TabSize)
+						} else {
+							indentStr = "\t"
 						}
+						b.runMultiCursorInsert(func(Loc, bool) string { return indentStr })
 					}
 				} else {
-					// 🟢 expand_tab 설정 상태에 따라 들여쓰기 텍스트를 다르게 빌드합니다.
-					var indentStr string
-					if editor.cfg.ExpandTab {
-						indentStr = strings.Repeat(" ", editor.cfg.TabSize)
-					} else {
-						indentStr = "\t"
+					s, e := b.getSelectionRange()
+					if !hasSel {
+						s = b.cursor
+						e = b.cursor
 					}
-					indentLen := len([]rune(indentStr)) // 스페이스 개수(TabSize) 또는 탭 문자 1개(1)
+					oldCursor := b.cursor
 
-					if hasSel && s.L != e.L { // 💡 다중 줄 선택 시 전체 줄 들여쓰기
-						for r := e.L; r >= s.L; r-- {
-							b.InsertTextWithRecord(Loc{r, 0}, indentStr)
-							if r == oldCursor.L {
-								oldCursor.C += indentLen
-							}
-							if r == s.L {
-								s.C += indentLen
-							}
-							if r == e.L {
-								e.C += indentLen
+					if isShift || ev.Key() == tcell.KeyBacktab {
+						for r := s.L; r <= e.L; r++ {
+							line := b.lines[r]
+							if len(line) > 0 {
+								removeCount := 0
+								if line[0] == '\t' {
+									removeCount = 1
+								} else {
+									for removeCount < len(line) && removeCount < editor.cfg.TabSize && line[removeCount] == ' ' {
+										removeCount++
+									}
+								}
+								if removeCount > 0 {
+									b.DeleteTextWithRecord(Loc{L: r, C: 0, TargetX: -1}, Loc{L: r, C: removeCount, TargetX: -1})
+									if r == oldCursor.L {
+										oldCursor.C -= removeCount
+										if oldCursor.C < 0 {
+											oldCursor.C = 0
+										}
+									}
+									if hasSel {
+										if r == s.L {
+											s.C -= removeCount
+											if s.C < 0 {
+												s.C = 0
+											}
+										}
+										if r == e.L {
+											e.C -= removeCount
+											if e.C < 0 {
+												e.C = 0
+											}
+										}
+									}
+								}
 							}
 						}
 					} else {
-						// 💡 단일 줄 내에서 글자를 드래그한 상태면 지우고 탭 삽입
-						if hasSel {
-							b.DeleteSelection()
-							oldCursor = b.cursor
-							hasSel = false
+						// 🟢 expand_tab 설정 상태에 따라 들여쓰기 텍스트를 다르게 빌드합니다.
+						var indentStr string
+						if editor.cfg.ExpandTab {
+							indentStr = strings.Repeat(" ", editor.cfg.TabSize)
+						} else {
+							indentStr = "\t"
 						}
-						b.InsertTextWithRecord(oldCursor, indentStr)
-						oldCursor.C += indentLen
-					}
-				}
+						indentLen := len([]rune(indentStr)) // 스페이스 개수(TabSize) 또는 탭 문자 1개(1)
 
-				b.cursor = b.alignToRuneBoundary(oldCursor)
-				if hasSel {
-					b.selection.Start = b.alignToRuneBoundary(s)
-					b.selection.End = b.alignToRuneBoundary(e)
+						if hasSel && s.L != e.L { // 💡 다중 줄 선택 시 전체 줄 들여쓰기
+							for r := e.L; r >= s.L; r-- {
+								b.InsertTextWithRecord(Loc{L: r, C: 0, TargetX: -1}, indentStr)
+								if r == oldCursor.L {
+									oldCursor.C += indentLen
+								}
+								if r == s.L {
+									s.C += indentLen
+								}
+								if r == e.L {
+									e.C += indentLen
+								}
+							}
+						} else {
+							// 💡 단일 줄 내에서 글자를 드래그한 상태면 지우고 탭 삽입
+							if hasSel {
+								b.DeleteSelection()
+								oldCursor = b.cursor
+								hasSel = false
+							}
+							b.InsertTextWithRecord(oldCursor, indentStr)
+							oldCursor.C += indentLen
+						}
+					}
+
+					b.cursor = b.alignToRuneBoundary(oldCursor)
+					if hasSel {
+						b.selection.Start = b.alignToRuneBoundary(s)
+						b.selection.End = b.alignToRuneBoundary(e)
+					}
 				}
 				b.EndTransaction()
 				needsLayout = true
 
 			case tcell.KeyEscape:
 				b.clearSelection()
+				if len(b.extraCursors) > 0 {
+					b.extraCursors = nil // ponytail: exit multi-cursor mode
+					editor.needsFullRefresh = true
+				}
 				snapToCursor = false
 
 			case tcell.KeyLeft:
-				if isCtrl {
-					b.moveWordLeft()
-				} else {
-					if b.cursor.C > 0 {
-						_, size := utf8.DecodeLastRune(b.lines[b.cursor.L][:b.cursor.C])
-						b.cursor.C -= size
-					} else if b.cursor.L > 0 {
-						b.cursor.L--
-						b.cursor.C = len(b.lines[b.cursor.L])
+				// ponytail: cursor-count-agnostic (see runMultiCursorMove).
+				b.runMultiCursorMove(func() {
+					if isCtrl {
+						b.moveWordLeft()
+					} else {
+						if b.cursor.C > 0 {
+							_, size := utf8.DecodeLastRune(b.lines[b.cursor.L][:b.cursor.C])
+							b.cursor.C -= size
+						} else if b.cursor.L > 0 {
+							b.cursor.L--
+							b.cursor.C = len(b.lines[b.cursor.L])
+						}
 					}
-				}
+				})
 			case tcell.KeyRight:
-				if isCtrl {
-					b.moveWordRight()
-				} else {
-					if b.cursor.C < len(b.lines[b.cursor.L]) {
-						_, size := utf8.DecodeRune(b.lines[b.cursor.L][b.cursor.C:])
-						b.cursor.C += size
-					} else if b.cursor.L < len(b.lines)-1 {
-						b.cursor.L++
-						b.cursor.C = 0
+				b.runMultiCursorMove(func() {
+					if isCtrl {
+						b.moveWordRight()
+					} else {
+						if b.cursor.C < len(b.lines[b.cursor.L]) {
+							_, size := utf8.DecodeRune(b.lines[b.cursor.L][b.cursor.C:])
+							b.cursor.C += size
+						} else if b.cursor.L < len(b.lines)-1 {
+							b.cursor.L++
+							b.cursor.C = 0
+						}
 					}
-				}
+				})
 			case tcell.KeyUp:
-				if isCtrl {
-					b.moveParagraphUp()
-				} else {
-					b.moveCursorVisualLine(-1, editor.cfg) // 🟢 O(1) 로컬 이동으로 교체
-				}
+				b.runMultiCursorMove(func() {
+					if isCtrl {
+						b.moveParagraphUp()
+					} else {
+						b.moveCursorVisualLine(-1, editor.cfg, &b.cursor.TargetX)
+					}
+				})
 			case tcell.KeyDown:
-				if isCtrl {
-					b.moveParagraphDown()
-				} else {
-					b.moveCursorVisualLine(1, editor.cfg) // 🟢 O(1) 로컬 이동으로 교체
-				}
+				b.runMultiCursorMove(func() {
+					if isCtrl {
+						b.moveParagraphDown()
+					} else {
+						b.moveCursorVisualLine(1, editor.cfg, &b.cursor.TargetX)
+					}
+				})
 			case tcell.KeyPgUp:
-				b.moveCursorVisualLine(-(h - 2), editor.cfg) // 🟢 로컬 이동으로 교체
+				b.runMultiCursorMove(func() {
+					b.moveCursorVisualLine(-(h - 2), editor.cfg, &b.cursor.TargetX)
+				})
 			case tcell.KeyPgDn:
-				b.moveCursorVisualLine(h-2, editor.cfg) // 🟢 로컬 이동으로 교체
+				b.runMultiCursorMove(func() {
+					b.moveCursorVisualLine(h-2, editor.cfg, &b.cursor.TargetX)
+				})
 			case tcell.KeyHome:
 				if isCtrl {
-					b.cursor = Loc{0, 0}
+					b.cursor = Loc{L: 0, C: 0, TargetX: -1}
+					if len(b.extraCursors) > 0 {
+						b.extraCursors = nil // ponytail: Ctrl+Home collapses multi-cursor
+						editor.needsFullRefresh = true
+					}
 				} else {
-					cursorSub := b.getCursorSub(editor.cfg)
-					currentVL := b.vCache[b.cursor.L][cursorSub]
-					b.cursor.C = currentVL.startCX // 🟢 로컬 계산으로 교체
+					// ponytail: cursor-count-agnostic, and now soft-wrap-aware
+					// for extra cursors too (previously they used a naive
+					// line-start shortcut instead of the wrapped sub-line).
+					b.runMultiCursorMove(func() {
+						cursorSub := b.getCursorSub(editor.cfg)
+						currentVL := b.vCache[b.cursor.L][cursorSub]
+						b.cursor.C = currentVL.startCX
+					})
 				}
 			case tcell.KeyEnd:
 				if isCtrl {
@@ -5449,112 +6314,128 @@ func main() {
 					if lastLineIdx < 0 {
 						lastLineIdx = 0
 					}
-					b.cursor = Loc{lastLineIdx, len(b.lines[lastLineIdx])}
+					b.cursor = Loc{L: lastLineIdx, C: len(b.lines[lastLineIdx]), TargetX: -1}
 					b.stickToWrapEnd = true
+					if len(b.extraCursors) > 0 {
+						b.extraCursors = nil // ponytail: Ctrl+End collapses multi-cursor
+						editor.needsFullRefresh = true
+					}
 				} else {
-					cursorSub := b.getCursorSub(editor.cfg)
-					currentVL := b.vCache[b.cursor.L][cursorSub]
-					b.cursor.C = currentVL.endCX // 🟢 로컬 계산으로 교체
+					b.runMultiCursorMove(func() {
+						cursorSub := b.getCursorSub(editor.cfg)
+						currentVL := b.vCache[b.cursor.L][cursorSub]
+						b.cursor.C = currentVL.endCX
+					})
 					b.stickToWrapEnd = true
 				}
+
 			case tcell.KeyEnter:
+				// ponytail: cursor-count-agnostic -- runMultiCursorInsert
+				// degenerates to the old single-cursor behavior when there
+				// are no extra cursors, so there's no separate single path.
 				b.BeginTransaction()
 				b.DeleteSelection()
-				indentStr := ""
-				if editor.cfg.AutoIndent {
-					line := b.lines[b.cursor.L]
-					for i := 0; i < b.cursor.C && i < len(line); i++ {
-						if line[i] == ' ' || line[i] == '\t' {
-							indentStr += string(line[i])
-						} else {
-							break
+				b.runMultiCursorInsert(func(loc Loc, _ bool) string {
+					indentStr := ""
+					if editor.cfg.AutoIndent {
+						line := b.lines[loc.L]
+						for j := 0; j < loc.C && j < len(line); j++ {
+							if line[j] == ' ' || line[j] == '\t' {
+								indentStr += string(line[j])
+							} else {
+								break
+							}
 						}
 					}
-				}
-				b.InsertTextWithRecord(b.cursor, "\n"+indentStr)
+					return "\n" + indentStr
+				})
 				b.EndTransaction()
 				needsLayout = true
 
 			case tcell.KeyBackspace2, tcell.KeyBackspace:
+				// ponytail: cursor-count-agnostic (see KeyEnter). A selection
+				// still consumes the whole backspace, whether or not extra
+				// cursors exist -- extra cursors never carry a selection, so
+				// they're untouched either way.
 				b.BeginTransaction()
 				if !b.DeleteSelection() {
-					if b.cursor.C > 0 {
-						startX := b.cursor.C
-						if isCtrl || isAlt {
-							oldCursor := b.cursor
-							b.moveWordLeft()
-							startX = b.cursor.C
-							b.cursor = oldCursor
-							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
-						} else if editor.cfg.SmartBackspace {
-							// 💡 스마트 백스페이스 로직 추가
-							line := b.lines[b.cursor.L]
-							isAllSpaces := true
-							for i := 0; i < b.cursor.C; i++ {
-								if line[i] != ' ' {
-									isAllSpaces = false
-									break
+					b.runMultiCursorDelete(func(loc Loc, _ bool) (Loc, Loc) {
+						if loc.C > 0 {
+							startX := loc.C
+							if isCtrl || isAlt {
+								b.cursor = loc
+								b.moveWordLeft()
+								startX = b.cursor.C
+								b.cursor = loc
+							} else if editor.cfg.SmartBackspace {
+								line := b.lines[loc.L]
+								isAllSpaces := true
+								for i := 0; i < loc.C; i++ {
+									if line[i] != ' ' {
+										isAllSpaces = false
+										break
+									}
 								}
-							}
-							// 커서 앞이 전부 공백이라면 탭 크기 단위로 정렬하여 삭제
-							if isAllSpaces {
-								rem := b.cursor.C % editor.cfg.TabSize
-								if rem == 0 {
-									rem = editor.cfg.TabSize
+								if isAllSpaces {
+									rem := loc.C % editor.cfg.TabSize
+									if rem == 0 {
+										rem = editor.cfg.TabSize
+									}
+									startX -= rem
+								} else {
+									_, size := utf8.DecodeLastRune(line[:loc.C])
+									startX -= size
 								}
-								startX -= rem
 							} else {
-								_, size := utf8.DecodeLastRune(line[:b.cursor.C])
+								_, size := utf8.DecodeLastRune(b.lines[loc.L][:loc.C])
 								startX -= size
 							}
-							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, b.cursor)
-						} else {
-							// 기본 백스페이스 (글자 1개 삭제)
-							_, size := utf8.DecodeLastRune(b.lines[b.cursor.L][:b.cursor.C])
-							startX -= size
-							b.DeleteTextWithRecord(Loc{b.cursor.L, startX}, Loc{b.cursor.L, b.cursor.C})
+							return Loc{L: loc.L, C: startX, TargetX: -1}, loc
+						} else if loc.L > 0 {
+							return Loc{L: loc.L - 1, C: len(b.lines[loc.L-1]), TargetX: -1}, loc
 						}
-					} else if b.cursor.L > 0 {
-						b.DeleteTextWithRecord(Loc{b.cursor.L - 1, len(b.lines[b.cursor.L-1])}, b.cursor)
-					}
+						return loc, loc
+					})
 				}
 				b.EndTransaction()
 				needsLayout = true
 
 			case tcell.KeyDelete:
+				// ponytail: cursor-count-agnostic (see KeyEnter/KeyBackspace).
 				b.BeginTransaction()
 				if !b.DeleteSelection() {
-					lineLen := len(b.lines[b.cursor.L])
-					if isCtrl || isAlt {
-						if b.cursor.C < lineLen {
-							oldCursor := b.cursor
-							b.moveWordRight()
-							endX := b.cursor.C
-							b.cursor = oldCursor
-							b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L, endX})
-						} else if b.cursor.L < len(b.lines)-1 {
-							b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L + 1, 0})
+					b.runMultiCursorDelete(func(loc Loc, _ bool) (Loc, Loc) {
+						lineLen := len(b.lines[loc.L])
+						if loc.C < lineLen {
+							if isCtrl || isAlt {
+								b.cursor = loc
+								b.moveWordRight()
+								endX := b.cursor.C
+								b.cursor = loc
+								return loc, Loc{L: loc.L, C: endX, TargetX: -1}
+							}
+							_, size := utf8.DecodeRune(b.lines[loc.L][loc.C:])
+							return loc, Loc{L: loc.L, C: loc.C + size, TargetX: -1}
+						} else if loc.L < len(b.lines)-1 {
+							return loc, Loc{L: loc.L + 1, C: 0, TargetX: -1}
 						}
-					} else {
-						if b.cursor.C < lineLen {
-							_, size := utf8.DecodeRune(b.lines[b.cursor.L][b.cursor.C:])
-							b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L, b.cursor.C + size})
-						} else if b.cursor.L < len(b.lines)-1 {
-							b.DeleteTextWithRecord(b.cursor, Loc{b.cursor.L + 1, 0})
-						}
-					}
+						return loc, loc
+					})
 				}
 				b.EndTransaction()
 				needsLayout = true
 
 			case tcell.KeyRune:
+				// ponytail: cursor-count-agnostic (see KeyEnter).
 				if ev.Rune() != 0 {
 					b.BeginTransaction()
 					b.DeleteSelection()
-					b.InsertTextWithRecord(b.cursor, string(ev.Rune()))
+					r := ev.Rune()
+					b.runMultiCursorInsert(func(Loc, bool) string { return string(r) })
 					b.EndTransaction()
 					needsLayout = true
 				}
+
 			}
 			if isShift && b.isSelecting {
 				b.selection.End = b.cursor
