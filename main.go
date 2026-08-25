@@ -50,6 +50,10 @@ type Config struct {
 	AutoIndent      bool   `json:"auto_indent"`
 	ExpandTab       bool   `json:"expand_tab"`
 	SmartBackspace  bool   `json:"smart_backspace"`
+
+	// 💡 액션 ID -> 단축키 문자열. 기본값과 다른 항목만 기록된다 (빈 문자열 = 바인딩 해제).
+	// nil 이면 전부 기본값. 자세한 내용은 [ 단축키 바인딩 엔진 ] 섹션 참조.
+	Keybindings map[string]string `json:"keybindings,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -78,12 +82,9 @@ func LoadConfig() Config {
 	if configPath == "" {
 		return DefaultConfig()
 	}
-	configDir := filepath.Dir(configPath)
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		_ = os.MkdirAll(configDir, 0755)
 		defaultCfg := DefaultConfig()
-		data, _ := json.MarshalIndent(defaultCfg, "", "    ")
-		_ = os.WriteFile(configPath, data, 0644)
+		_ = SaveConfig(defaultCfg)
 		return defaultCfg
 	}
 	data, err := os.ReadFile(configPath)
@@ -96,6 +97,24 @@ func LoadConfig() Config {
 	}
 	// 💡 0 이하일 때 20000으로 강제하는 로직 삭제 (0을 제한 없음으로 인정)
 	return cfg
+}
+
+// 💡 config.json 을 통째로 다시 쓴다. 단축키 메뉴처럼 에디터가 스스로 설정을
+// 바꾸는 경로에서 사용한다. 저장 자체는 비원자적(직접 덮어쓰기)이며, 이는
+// saveToFile 과 동일한 의도적 설계다.
+func SaveConfig(cfg Config) error {
+	configPath := getConfigPath()
+	if configPath == "" {
+		return fmt.Errorf("설정 경로를 찾을 수 없습니다")
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "    ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, data, 0644)
 }
 
 func (e *Editor) closeBuffer(idx int) {
@@ -491,6 +510,24 @@ type Editor struct {
 	encodeMenuW      int
 	encodeMenuH      int
 
+	// 💡 단축키 설정 메뉴 상태 (인코딩 메뉴와 동일한 구조)
+	keyMenuActive     bool
+	keyMenuState      int    // 0:닫힘, 1:목록, 2:새 키 캡처
+	keyMenuTargetID   string // state 2 에서 재바인딩 중인 액션 ID
+	keyMenuTitle      string
+	keyMenuItems      []PaletteItem
+	keyMenuCursor     int
+	keyMenuListCursor int // 캡처 화면에 들어가기 직전의 목록 위치
+	keyMenuListH      int // 캡처 화면에 들어가기 직전의 목록 실제 높이 (돌아올 때 스크롤 계산용)
+	keyMenuX          int
+	keyMenuY          int
+	keyMenuW          int
+	keyMenuH          int
+
+	// 💡 라이브 단축키 표. cfg 가 바뀔 때마다 applyConfig 가 다시 만든다.
+	bindings  map[KeyChord]*ActionDef
+	bindingOf map[string]KeyChord
+
 	needsFullRefresh bool
 	mouseX           int
 	mouseY           int
@@ -503,6 +540,7 @@ type Editor struct {
 	prevPalette       bool
 	prevCtxMenu       bool
 	prevEncode        bool
+	prevKeyMenu       bool
 	prevPrompt        bool
 	prevSearch        bool
 	prevGoto          bool
@@ -559,20 +597,43 @@ func NewEditor() *Editor {
 	e := &Editor{
 		buffers:          []*Buffer{NewBuffer()},
 		activeBuffer:     0,
-		cfg:              LoadConfig(),
 		fileWatcher:      watcher,
 		needsFullRefresh: true,
 		prevActiveBuf:    -1,
 		prevVOffset:      -1,
 		prevHOffset:      -1,
 	}
-	e.initPalette()
-	e.initContextMenu()
+	e.applyConfig(LoadConfig())
 	e.initEncodingMenu() // 💡 인코딩 메뉴 초기화 호출
 
 	go e.listenFileChanges()
 
 	return e
+}
+
+// 💡 설정을 적용하는 유일한 경로. cfg 를 그냥 대입하면 단축키 표와 메뉴의
+// 표시 문자열이 낡은 채로 남으므로, e.cfg 를 바꾸는 곳은 전부 이 함수를 쓴다.
+func (e *Editor) applyConfig(cfg Config) {
+	e.cfg = cfg
+	e.bindings, e.bindingOf = buildBindings(cfg)
+	e.initPalette()
+	e.initContextMenu()
+	e.needsFullRefresh = true
+}
+
+// 💡 액션 ID 의 현재 단축키 표시 문자열. 바인딩이 없으면 빈 문자열.
+func (e *Editor) shortcutOf(id string) string {
+	return chordString(e.bindingOf[id])
+}
+
+// 💡 액션 ID 로 팔레트/컨텍스트 메뉴 항목을 만든다. Shortcut 이 라이브 바인딩에서
+// 파생되므로 리바인딩 후에도 표시가 어긋나지 않는다.
+func (e *Editor) actionItem(id string) PaletteItem {
+	a, ok := actionByID[id]
+	if !ok {
+		return PaletteItem{Name: id}
+	}
+	return PaletteItem{Name: a.Name, Shortcut: e.shortcutOf(id), Action: a.Fn}
 }
 
 func (e *Editor) listenFileChanges() {
@@ -622,11 +683,11 @@ func (e *Editor) listenFileChanges() {
 
 func (e *Editor) initContextMenu() {
 	e.ctxMenuItems = []PaletteItem{
-		{"복사 (Copy)", "Ctrl+C", ActionMap[tcell.KeyCtrlC]},
-		{"잘라내기 (Cut)", "Ctrl+X", ActionMap[tcell.KeyCtrlX]},
-		{"붙여넣기 (Paste)", "Ctrl+V", ActionMap[tcell.KeyCtrlV]},
-		{"모두 선택 (Select All)", "Ctrl+A", ActionMap[tcell.KeyCtrlA]},
-		{"현재 탭 닫기 (Close Tab)", "Ctrl+W", ActionMap[tcell.KeyCtrlW]},
+		e.actionItem("copy"),
+		e.actionItem("cut"),
+		e.actionItem("paste"),
+		e.actionItem("select_all"),
+		e.actionItem("close_tab"),
 	}
 }
 
@@ -714,31 +775,27 @@ func (e *Editor) showEncodeEncodingMenu() {
 
 func (e *Editor) initPalette() {
 	e.paletteItems = []PaletteItem{
-		{"파일 열기 (Open)", "Ctrl+O", ActionMap[tcell.KeyCtrlO]},
-		{"저장 (Save)", "Ctrl+S", ActionMap[tcell.KeyCtrlS]},
-		{"다른 이름으로 저장 (Save As)", "F12", ActionMap[tcell.KeyF12]},
-		{"새 탭 열기 (New Tab)", "Ctrl+N", ActionMap[tcell.KeyCtrlN]},
-		{"현재 탭 닫기 (Close Tab)", "Ctrl+W", ActionMap[tcell.KeyCtrlW]},
-		{"다음 탭 (Next Tab)", "Alt+.", func(e *Editor, s tcell.Screen) {
-			e.activeBuffer = (e.activeBuffer + 1) % len(e.buffers)
-			e.needsFullRefresh = true
-		}},
-		{"이전 탭 (Prev Tab)", "Alt+,", func(e *Editor, s tcell.Screen) {
-			e.activeBuffer = (e.activeBuffer - 1 + len(e.buffers)) % len(e.buffers)
-			e.needsFullRefresh = true
-		}},
-		{"실행 취소 (Undo)", "Ctrl+Z", ActionMap[tcell.KeyCtrlZ]},
-		{"다시 실행 (Redo)", "Ctrl+Y", ActionMap[tcell.KeyCtrlY]},
-		{"모두 선택 (Select All)", "Ctrl+A", ActionMap[tcell.KeyCtrlA]},
-		{"복사 (Copy)", "Ctrl+C", ActionMap[tcell.KeyCtrlC]},
-		{"잘라내기 (Cut)", "Ctrl+X", ActionMap[tcell.KeyCtrlX]},
-		{"붙여넣기 (Paste)", "Ctrl+V", ActionMap[tcell.KeyCtrlV]},
-		{"찾기 (Find)", "Ctrl+F", ActionMap[tcell.KeyCtrlF]},
-		{"바꾸기 (Replace)", "Ctrl+R", ActionMap[tcell.KeyCtrlR]},
-		{"줄 이동 (Go To Line)", "Ctrl+G", ActionMap[tcell.KeyCtrlG]},
-		{"시간 삽입 (Insert Time)", "F5", ActionMap[tcell.KeyF5]},
+		e.actionItem("open"),
+		e.actionItem("save"),
+		e.actionItem("save_as"),
+		e.actionItem("new_tab"),
+		e.actionItem("close_tab"),
+		e.actionItem("next_tab"),
+		e.actionItem("prev_tab"),
+		e.actionItem("undo"),
+		e.actionItem("redo"),
+		e.actionItem("select_all"),
+		e.actionItem("copy"),
+		e.actionItem("cut"),
+		e.actionItem("paste"),
+		e.actionItem("find"),
+		e.actionItem("replace"),
+		e.actionItem("goto_line"),
+		e.actionItem("insert_time"),
 
-		{"설정 파일 편집 (Toggle Config)", "Ctrl+T", ActionMap[tcell.KeyCtrlT]},
+		e.actionItem("toggle_config"),
+
+		{"단축키 설정 (Keybindings)", "", func(e *Editor, s tcell.Screen) { e.showKeybindMenu() }},
 
 		{"설정 초기화 (Reset Config)", "", func(e *Editor, s tcell.Screen) {
 			e.promptMode = true
@@ -751,7 +808,173 @@ func (e *Editor) initPalette() {
 			e.needsFullRefresh = true    // 화면 UI(자물쇠 아이콘 등) 즉시 갱신
 		}},
 
-		{"에디터 종료 (Quit)", "Ctrl+Q", ActionMap[tcell.KeyCtrlQ]},
+		e.actionItem("quit"),
+	}
+}
+
+// 💡 단축키 설정 메뉴 (state 1: 전체 목록).
+// 인코딩 메뉴와 같은 규칙: W/H 를 0 으로 리셋해 drawMenu 가 위치를 다시 계산하게 한다.
+// menuScrollOffset 은 세 메뉴가 공유하는 필드라 반드시 같이 리셋해야 한다.
+func (e *Editor) showKeybindMenu() {
+	e.keyMenuActive = true
+	e.keyMenuState = 1
+	e.keyMenuTargetID = ""
+	e.keyMenuTitle = " 단축키 설정 (Keybindings) "
+	e.keyMenuW, e.keyMenuH = 0, 0
+	e.keyMenuCursor = 0
+	e.menuScrollOffset = 0
+
+	e.keyMenuItems = []PaletteItem{
+		{"모든 단축키 기본값으로 되돌리기 (Reset All)", "", func(e *Editor, s tcell.Screen) {
+			e.promptMode = true
+			e.promptType = "reset_keybinds"
+		}},
+	}
+	for i := range Actions {
+		a := &Actions[i]
+		label := chordString(e.bindingOf[a.ID])
+		if label == "" {
+			label = "(없음)"
+		}
+		id := a.ID
+		e.keyMenuItems = append(e.keyMenuItems, PaletteItem{
+			Name:     a.Name,
+			Shortcut: label,
+			Action:   func(e *Editor, s tcell.Screen) { e.showKeybindCapture(id) },
+		})
+	}
+	e.needsFullRefresh = true
+}
+
+// 💡 state 2: 새 키를 기다리는 캡처 화면. 항목은 안내문 두 줄뿐이고 Action 은 nil 이다
+// (drawMenu 를 그대로 재사용하기 위한 표시용 항목).
+func (e *Editor) showKeybindCapture(id string) {
+	a, ok := actionByID[id]
+	if !ok {
+		return
+	}
+	// 💡 목록 화면의 실제 높이를 기억해 둔다. 아래에서 keyMenuW/H 를 0 으로
+	// 리셋하면 캡처 화면 자체의 크기(항목 2개)로 재계산되어 버려서, 돌아갈 때
+	// 쓸 "목록 기준 높이"를 여기서 미리 붙잡아 두지 않으면 잃어버린다.
+	if e.keyMenuH > 0 {
+		e.keyMenuListH = e.keyMenuH
+	}
+	e.keyMenuActive = true
+	e.keyMenuState = 2
+	e.keyMenuTargetID = id
+	e.keyMenuListCursor = e.keyMenuCursor
+	e.keyMenuTitle = " " + a.Name + " "
+	e.keyMenuW, e.keyMenuH = 0, 0
+	e.keyMenuCursor = -1
+	e.menuScrollOffset = 0
+	e.keyMenuItems = []PaletteItem{
+		{Name: "새 단축키를 누르세요", Shortcut: chordString(e.bindingOf[id])},
+		{Name: "Esc:취소  Delete:기본값  Backspace:해제"},
+	}
+	e.needsFullRefresh = true
+}
+
+// 💡 캡처 화면에서 목록으로 돌아온다. 26개짜리 목록이라 매번 맨 위로 튀면
+// 아래쪽 항목을 연달아 고칠 때 괴롭다 — 보고 있던 위치를 복원한다.
+func (e *Editor) backToKeybindList() {
+	want := e.keyMenuListCursor
+	savedH := e.keyMenuListH
+	e.showKeybindMenu()
+	if savedH > 0 {
+		// 💡 showKeybindMenu() 가 keyMenuH 를 0 으로 리셋해 놓아서, 이 시점에 바로
+		// followKeybindCursor 를 부르면 (다음 draw 가 재계산하기 전까지) 높이를
+		// 0으로 여기고 스크롤 보정을 건너뛴다. 캡처에 들어가기 전 실제 높이를
+		// 임시로 되돌려 놓아 이번 프레임부터 바로 정확히 스크롤되게 한다.
+		e.keyMenuH = savedH
+	}
+	if want > 0 && want < len(e.keyMenuItems) {
+		e.keyMenuCursor = want
+	}
+	e.followKeybindCursor()
+}
+
+// 💡 선택 항목이 보이도록 스크롤 창을 맞춘다. menuScrollOffset 은 모든 메뉴가
+// 공유하는 필드이므로 단축키 메뉴가 열려 있을 때만 만진다.
+func (e *Editor) followKeybindCursor() {
+	visibleItems := e.keyMenuH - 2
+	if visibleItems <= 0 || e.keyMenuCursor < 0 {
+		return
+	}
+	if e.keyMenuCursor < e.menuScrollOffset {
+		e.menuScrollOffset = e.keyMenuCursor
+	} else if e.keyMenuCursor >= e.menuScrollOffset+visibleItems {
+		e.menuScrollOffset = e.keyMenuCursor - visibleItems + 1
+	}
+}
+
+func (e *Editor) closeKeybindMenu() {
+	if e.keyMenuActive {
+		e.needsFullRefresh = true
+	}
+	e.keyMenuActive = false
+	e.keyMenuState = 0
+	e.keyMenuTargetID = ""
+	e.menuScrollOffset = 0 // 세 메뉴가 공유하는 필드라 나갈 때 비워 둔다
+}
+
+// 💡 단축키 하나를 확정한다. chord 가 제로면 해제.
+// 성공하면 config.json 까지 즉시 기록하고 목록 화면으로 돌아간다.
+// 실패하면 기존 alert 프롬프트로 이유를 알리고 캡처 화면에 머문다.
+func (e *Editor) commitKeybind(id string, chord KeyChord) {
+	a, ok := actionByID[id]
+	if !ok {
+		return
+	}
+	chord = normalizeChord(chord)
+
+	if chord.isZero() {
+		if id == actionIDPalette {
+			e.showKeybindAlert("커맨드 팔레트는 해제할 수 없습니다 (되돌릴 방법이 사라집니다)")
+			return
+		}
+	} else {
+		if reservedChord(chord) {
+			e.showKeybindAlert(chordString(chord) + " 는 편집기 예약 키라 사용할 수 없습니다")
+			return
+		}
+		if other, dup := e.bindings[chord]; dup && other.ID != id {
+			e.showKeybindAlert(chordString(chord) + " 는 이미 '" + other.Name + "' 에 할당되어 있습니다")
+			return
+		}
+	}
+
+	cfg := e.cfg
+	byID := make(map[string]KeyChord, len(e.bindingOf))
+	for k, v := range e.bindingOf {
+		byID[k] = v
+	}
+	byID[a.ID] = chord
+	cfg.Keybindings = keybindOverrides(byID)
+
+	e.applyConfig(cfg)
+	if err := SaveConfig(e.cfg); err != nil {
+		e.showKeybindAlert("설정 저장 실패: " + err.Error())
+	}
+	e.syncConfigBuffers()
+	e.backToKeybindList()
+}
+
+// 💡 에러는 기존 alert 프롬프트를 재사용한다. promptMode 는 이벤트 캐스케이드
+// 최상단이라, Enter/Esc 로 닫으면 그 아래 살아 있는 단축키 메뉴로 자연히 돌아온다.
+func (e *Editor) showKeybindAlert(msg string) {
+	e.alertMessage = msg
+	e.promptMode = true
+	e.promptType = "alert"
+	e.needsFullRefresh = true
+}
+
+// 💡 우리가 config.json 을 직접 덮어썼을 때, 열려 있는 설정 탭을 즉시 맞춰 준다.
+// 수정 중인 탭은 건드리지 않고 파일 감시기의 external_change 프롬프트에 맡긴다.
+func (e *Editor) syncConfigBuffers() {
+	for _, buf := range e.buffers {
+		if buf != nil && buf.isConfig && !buf.isModified {
+			buf.reloadFromDisk()
+		}
 	}
 }
 
@@ -2612,6 +2835,36 @@ func (b *Buffer) addCursorBelow(cfg Config) {
 	b.cleanExtraCursors()
 }
 
+// 💡 현재 줄과 윗줄을 통째로 맞바꾼다. 두 줄을 한 번에 지우고 순서를 뒤집어
+// 다시 넣기 때문에 undo 한 스텝으로 되돌아간다.
+func (b *Buffer) moveLineUp() {
+	if b.cursor.L <= 0 {
+		return
+	}
+	oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
+	b.BeginTransaction()
+	currStr := string(b.lines[oldL])
+	prevStr := string(b.lines[oldL-1])
+	b.DeleteTextWithRecord(Loc{L: oldL - 1, C: 0, TargetX: -1}, Loc{L: oldL, C: len(b.lines[oldL]), TargetX: -1})
+	b.InsertTextWithRecord(Loc{L: oldL - 1, C: 0, TargetX: -1}, currStr+"\n"+prevStr)
+	b.cursor = b.clampLoc(Loc{L: oldL - 1, C: oldC, TargetX: -1}) // 💡 절대 에러 방지
+	b.EndTransaction()
+}
+
+func (b *Buffer) moveLineDown() {
+	if b.cursor.L >= len(b.lines)-1 {
+		return
+	}
+	oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
+	b.BeginTransaction()
+	currStr := string(b.lines[oldL])
+	nextStr := string(b.lines[oldL+1])
+	b.DeleteTextWithRecord(Loc{L: oldL, C: 0, TargetX: -1}, Loc{L: oldL + 1, C: len(b.lines[oldL+1]), TargetX: -1})
+	b.InsertTextWithRecord(Loc{L: oldL, C: 0, TargetX: -1}, nextStr+"\n"+currStr)
+	b.cursor = b.clampLoc(Loc{L: oldL + 1, C: oldC, TargetX: -1}) // 💡 절대 에러 방지
+	b.EndTransaction()
+}
+
 func (b *Buffer) moveWordLeft() {
 	if b.cursor.C == 0 {
 		if b.cursor.L > 0 {
@@ -3158,6 +3411,7 @@ func (e *Editor) draw(s tcell.Screen) {
 		e.paletteActive || e.prevPalette ||
 		e.ctxMenuActive || e.prevCtxMenu ||
 		e.encodeMenuActive || e.prevEncode ||
+		e.keyMenuActive || e.prevKeyMenu ||
 		e.promptMode || e.prevPrompt ||
 		b.searchMode || e.prevSearch ||
 		b.gotoMode || e.prevGoto || len(b.lines) != e.prevLinesLen ||
@@ -3556,6 +3810,8 @@ func (e *Editor) draw(s tcell.Screen) {
 			promptMsg = " [Warning] 변경된 내용이 있습니다. 탭을 닫을까요? [Y/n]"
 		} else if e.promptType == "reset_config" {
 			promptMsg = " [Warning] 설정을 기본값으로 초기화하시겠습니까? [Y/n]"
+		} else if e.promptType == "reset_keybinds" {
+			promptMsg = " [Warning] 모든 단축키를 기본값으로 되돌리시겠습니까? [Y/n]"
 		} else if e.promptType == "reopen" {
 			promptMsg = " [Warning] 변경된 내용이 있습니다. 무시하고 다시 열까요? [Y/n]"
 		} else if e.promptType == "close_config" {
@@ -3805,7 +4061,11 @@ func (e *Editor) draw(s tcell.Screen) {
 			charCountStr = fmt.Sprintf("%d Chars", b.totalChars)
 		}
 
-		prefix := " [Ctrl+P] Command Palette | "
+		// 💡 리바인딩을 따라가도록 라이브 바인딩에서 생성한다.
+		prefix := " Command Palette | "
+		if sc := e.shortcutOf(actionIDPalette); sc != "" {
+			prefix = " [" + sc + "] Command Palette | "
+		}
 		encodeStr := "Encode:" + modeName
 
 		roStr := ""
@@ -3862,27 +4122,36 @@ func (e *Editor) draw(s tcell.Screen) {
 		}
 	}
 
-	drawMenu := func(isActive bool, title string, items []PaletteItem, cursor, anchorX, anchorY int, outX, outY, outW, outH *int) {
+	// 💡 centered=true 면 클릭 지점이 아니라 화면 중앙에 띄운다 (팔레트, 단축키 설정).
+	drawMenu := func(isActive bool, title string, items []PaletteItem, cursor, anchorX, anchorY int, centered bool, outX, outY, outW, outH *int) {
 		if !isActive {
 			return
 		}
 		pWidth := 40
-		if title == " Command Palette " {
+		if centered {
 			pWidth = 60
 		}
 		for _, item := range items {
-			w := runewidth.StringWidth(item.Name) + 10
+			// 💡 이름과 단축키가 한 줄에 좌/우로 나뉘어 그려지므로 둘 다 폭에 반영한다.
+			// (단축키 설정 메뉴는 양쪽이 다 길어서, 이름만 재면 서로 겹쳐 보인다)
+			w := runewidth.StringWidth(item.Name) + runewidth.StringWidth(item.Shortcut) + 6
 			if w > pWidth {
 				pWidth = w
 			}
+		}
+		if pWidth > w-2 {
+			pWidth = w - 2
 		}
 		pHeight := len(items) + 2
 		if pHeight > h-4 {
 			pHeight = h - 4
 		}
+		if pWidth < 4 || pHeight < 3 {
+			return
+		}
 
 		pX, pY := anchorX, anchorY
-		if title == " Command Palette " {
+		if centered {
 			pX = (w - pWidth) / 2
 			pY = (h - pHeight) / 2
 		} else if *outW == 0 && *outH == 0 {
@@ -4005,8 +4274,11 @@ func (e *Editor) draw(s tcell.Screen) {
 
 		if title != "" {
 			tx := pX + (pWidth-runewidth.StringWidth(title))/2
-			for i, r := range title {
-				setCell(tx+i, pY, r, nil, borderStyle)
+			// 💡 셀 폭만큼 전진해야 한다. range 의 인덱스는 바이트 오프셋이라
+			// 한글처럼 2칸짜리 문자가 섞이면 글자 사이로 테두리(─)가 비집고 나온다.
+			for _, r := range title {
+				setCell(tx, pY, r, nil, borderStyle)
+				tx += runewidth.RuneWidth(r)
 			}
 		}
 
@@ -4036,14 +4308,15 @@ func (e *Editor) draw(s tcell.Screen) {
 				cx += runewidth.RuneWidth(r)
 			}
 		}
-		if title == " Command Palette " {
+		if centered {
 			cursorVX = -1
 		}
 	}
 
-	drawMenu(e.paletteActive, " Command Palette ", e.paletteItems, e.paletteCursor, 0, 0, &e.paletteX, &e.paletteY, &e.paletteW, &e.paletteH)
-	drawMenu(e.ctxMenuActive, "", e.ctxMenuItems, e.ctxMenuCursor, e.ctxMenuX, e.ctxMenuY, &e.ctxMenuX, &e.ctxMenuY, &e.ctxMenuW, &e.ctxMenuH)
-	drawMenu(e.encodeMenuActive, e.encodeMenuTitle, e.encodeMenuItems, e.encodeMenuCursor, e.encodeMenuX, e.encodeMenuY, &e.encodeMenuX, &e.encodeMenuY, &e.encodeMenuW, &e.encodeMenuH)
+	drawMenu(e.paletteActive, " Command Palette ", e.paletteItems, e.paletteCursor, 0, 0, true, &e.paletteX, &e.paletteY, &e.paletteW, &e.paletteH)
+	drawMenu(e.ctxMenuActive, "", e.ctxMenuItems, e.ctxMenuCursor, e.ctxMenuX, e.ctxMenuY, false, &e.ctxMenuX, &e.ctxMenuY, &e.ctxMenuW, &e.ctxMenuH)
+	drawMenu(e.encodeMenuActive, e.encodeMenuTitle, e.encodeMenuItems, e.encodeMenuCursor, e.encodeMenuX, e.encodeMenuY, false, &e.encodeMenuX, &e.encodeMenuY, &e.encodeMenuW, &e.encodeMenuH)
+	drawMenu(e.keyMenuActive, e.keyMenuTitle, e.keyMenuItems, e.keyMenuCursor, e.keyMenuX, e.keyMenuY, true, &e.keyMenuX, &e.keyMenuY, &e.keyMenuW, &e.keyMenuH)
 
 	e.prevActiveBuf = e.activeBuffer
 	e.prevVOffset = b.vOffsetL
@@ -4052,6 +4325,7 @@ func (e *Editor) draw(s tcell.Screen) {
 	e.prevPalette = e.paletteActive
 	e.prevCtxMenu = e.ctxMenuActive
 	e.prevEncode = e.encodeMenuActive
+	e.prevKeyMenu = e.keyMenuActive
 	e.prevPrompt = e.promptMode
 	e.prevSearch = b.searchMode
 	e.prevGoto = b.gotoMode
@@ -4159,7 +4433,7 @@ func (e *Editor) saveActiveFile(s tcell.Screen) {
 		content := b.getContent()
 		var newCfg Config
 		if err := json.Unmarshal([]byte(content), &newCfg); err == nil {
-			e.cfg = newCfg
+			e.applyConfig(newCfg)
 		}
 	}
 }
@@ -4201,7 +4475,7 @@ func (e *Editor) saveAsFile(s tcell.Screen) {
 		content := b.getContent()
 		var newCfg Config
 		if err := json.Unmarshal([]byte(content), &newCfg); err == nil {
-			e.cfg = newCfg
+			e.applyConfig(newCfg)
 		}
 	}
 }
@@ -4537,150 +4811,555 @@ func (b *Buffer) replaceCurrent(overlap bool) {
 	}
 }
 
+// --- [ 단축키 바인딩 엔진 ] ---
+
 type EditorAction func(e *Editor, s tcell.Screen)
 
-var ActionMap = map[tcell.Key]EditorAction{
-	tcell.KeyCtrlG: func(e *Editor, s tcell.Screen) {
-		b := e.getActive()
-		b.clearSelection()
-		b.searchMode = false
-		b.gotoMode = true
-		b.gotoInput = []rune{}
-		b.inputCX = 0
-		b.isInputSelect = false
-	},
-	tcell.KeyF5: func(e *Editor, s tcell.Screen) {
-		b := e.getActive()
-		if b.isReadOnly {
-			return
+// 💡 KeyChord 는 "사용자가 실제로 누른 조합" 하나를 표현한다.
+// tcell 이 조합을 세 가지 다른 모양으로 넘겨주기 때문에 정규화가 핵심이다.
+//   - Ctrl+글자  -> KeyCtrlA..KeyCtrlZ (65..90) 상수 + ModCtrl + ch='a'..'z'
+//   - Alt+글자   -> KeyRune + ModAlt + Rune
+//   - Ctrl+Alt+Up -> KeyUp + ModCtrl|ModAlt
+//
+// 정규화하지 않으면 같은 물리 조합이 여러 chord 로 갈라져 맵 조회가 빗나간다.
+type KeyChord struct {
+	Key  tcell.Key
+	Rune rune          // Key == tcell.KeyRune 일 때만 유효
+	Mods tcell.ModMask // 정규화 후 ModCtrl|ModAlt|ModShift 만 남음
+}
+
+// 💡 Ctrl 이 상수에 이미 녹아 있는 키 구간 (tcell: KeyCtrlSpace=64 .. KeyCtrlUnderscore=95).
+func isCtrlConstKey(k tcell.Key) bool {
+	return k >= tcell.KeyCtrlSpace && k <= tcell.KeyCtrlUnderscore
+}
+
+func normalizeChord(c KeyChord) KeyChord {
+	// KeyCtrlS 같은 상수도 ch 에 's' 를 실어 오므로 반드시 지운다. 안 지우면
+	// 같은 키가 Rune 값에 따라 다른 맵 엔트리가 된다.
+	if c.Key != tcell.KeyRune {
+		c.Rune = 0
+	}
+	// Ctrl 이 상수에 접혀 있는 구간에서는 ModCtrl 을 떼어낸다 (중복 표현 제거).
+	if isCtrlConstKey(c.Key) {
+		c.Mods &^= tcell.ModCtrl
+	}
+	c.Mods &= tcell.ModCtrl | tcell.ModAlt | tcell.ModShift
+	return c
+}
+
+func chordFromEvent(ev *tcell.EventKey) KeyChord {
+	return normalizeChord(KeyChord{Key: ev.Key(), Rune: ev.Rune(), Mods: ev.Modifiers()})
+}
+
+func (c KeyChord) isZero() bool { return c.Key == 0 && c.Rune == 0 && c.Mods == 0 }
+
+// 💡 tcell.KeyNames 는 "Ctrl-A" 하이픈 표기를 쓴다. 이 에디터 UI 는 예전부터
+// "Ctrl+A" 표기이므로 Ctrl 구간만 자체 표를 쓴다.
+var ctrlChordNames = map[tcell.Key]string{
+	tcell.KeyCtrlSpace:      "Ctrl+Space",
+	tcell.KeyCtrlA:          "Ctrl+A",
+	tcell.KeyCtrlB:          "Ctrl+B",
+	tcell.KeyCtrlC:          "Ctrl+C",
+	tcell.KeyCtrlD:          "Ctrl+D",
+	tcell.KeyCtrlE:          "Ctrl+E",
+	tcell.KeyCtrlF:          "Ctrl+F",
+	tcell.KeyCtrlG:          "Ctrl+G",
+	tcell.KeyCtrlH:          "Ctrl+H",
+	tcell.KeyCtrlI:          "Ctrl+I",
+	tcell.KeyCtrlJ:          "Ctrl+J",
+	tcell.KeyCtrlK:          "Ctrl+K",
+	tcell.KeyCtrlL:          "Ctrl+L",
+	tcell.KeyCtrlM:          "Ctrl+M",
+	tcell.KeyCtrlN:          "Ctrl+N",
+	tcell.KeyCtrlO:          "Ctrl+O",
+	tcell.KeyCtrlP:          "Ctrl+P",
+	tcell.KeyCtrlQ:          "Ctrl+Q",
+	tcell.KeyCtrlR:          "Ctrl+R",
+	tcell.KeyCtrlS:          "Ctrl+S",
+	tcell.KeyCtrlT:          "Ctrl+T",
+	tcell.KeyCtrlU:          "Ctrl+U",
+	tcell.KeyCtrlV:          "Ctrl+V",
+	tcell.KeyCtrlW:          "Ctrl+W",
+	tcell.KeyCtrlX:          "Ctrl+X",
+	tcell.KeyCtrlY:          "Ctrl+Y",
+	tcell.KeyCtrlZ:          "Ctrl+Z",
+	tcell.KeyCtrlLeftSq:     "Ctrl+[",
+	tcell.KeyCtrlBackslash:  "Ctrl+\\",
+	tcell.KeyCtrlRightSq:    "Ctrl+]",
+	tcell.KeyCtrlCarat:      "Ctrl+^",
+	tcell.KeyCtrlUnderscore: "Ctrl+_",
+}
+
+// 💡 "Ctrl+A" / "Up" / "F12" -> tcell.Key 역방향 표. init() 에서 한 번만 만든다.
+var chordNameToKey map[string]tcell.Key
+
+func init() {
+	chordNameToKey = make(map[string]tcell.Key, len(tcell.KeyNames)+len(ctrlChordNames))
+	for k, name := range tcell.KeyNames {
+		if strings.HasPrefix(name, "Ctrl-") {
+			continue // Ctrl 구간은 아래 자체 표가 담당
 		}
-		b.BeginTransaction()
-		b.DeleteSelection()
-		goLayout := convertLinuxDateToGoLayout(e.cfg.DateFormat)
-		b.InsertTextWithRecord(b.cursor, time.Now().Format(goLayout))
-		b.EndTransaction()
-	},
-	tcell.KeyCtrlQ: func(e *Editor, s tcell.Screen) {
-		for _, b := range e.buffers {
-			if b.isModified {
-				e.promptMode = true
-				e.promptType = "quit"
-				return
+		chordNameToKey[name] = k
+	}
+	for k, name := range ctrlChordNames {
+		chordNameToKey[name] = k
+	}
+}
+
+// 💡 Ctrl 구간이 아닌 키의 표시 이름. Backspace/Tab/Enter/Esc 처럼
+// tcell.KeyNames 가 편집용 이름을 가진 키가 우선한다.
+func keyBaseName(k tcell.Key) (string, bool) {
+	if n, ok := tcell.KeyNames[k]; ok && !strings.HasPrefix(n, "Ctrl-") {
+		return n, true
+	}
+	if n, ok := ctrlChordNames[k]; ok {
+		return n, true
+	}
+	return "", false
+}
+
+// chordString 은 chord 를 "Ctrl+S" / "Alt+." / "Ctrl+Alt+Up" / "F12" 로 직렬화한다.
+// 빈 chord(바인딩 없음)는 빈 문자열. config.json 저장 형식이자 메뉴 표시 형식이다.
+func chordString(c KeyChord) string {
+	c = normalizeChord(c)
+	if c.isZero() {
+		return ""
+	}
+	prefix := ""
+	if c.Mods&tcell.ModCtrl != 0 {
+		prefix += "Ctrl+"
+	}
+	if c.Mods&tcell.ModAlt != 0 {
+		prefix += "Alt+"
+	}
+	if c.Mods&tcell.ModShift != 0 {
+		prefix += "Shift+"
+	}
+	if c.Key == tcell.KeyRune {
+		if c.Rune == ' ' {
+			return prefix + "Space"
+		}
+		if c.Rune == 0 {
+			return ""
+		}
+		return prefix + string(c.Rune)
+	}
+	name, ok := keyBaseName(c.Key)
+	if !ok {
+		return ""
+	}
+	return prefix + name
+}
+
+// parseChord 는 chordString 의 역연산. 빈 문자열은 "바인딩 해제"로 성공 처리한다.
+// "Ctrl+A" 자체가 하나의 이름이므로 전체 문자열 조회를 먼저 시도하고,
+// 실패했을 때만 앞쪽 수식어를 한 겹씩 벗긴다.
+func parseChord(s string) (KeyChord, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return KeyChord{}, true
+	}
+	var mods tcell.ModMask
+	for i := 0; i < 4; i++ {
+		if k, ok := chordNameToKey[s]; ok {
+			return normalizeChord(KeyChord{Key: k, Mods: mods}), true
+		}
+		if s == "Space" {
+			return normalizeChord(KeyChord{Key: tcell.KeyRune, Rune: ' ', Mods: mods}), true
+		}
+		if utf8.RuneCountInString(s) == 1 {
+			r, _ := utf8.DecodeRuneInString(s)
+			return normalizeChord(KeyChord{Key: tcell.KeyRune, Rune: r, Mods: mods}), true
+		}
+		switch {
+		case strings.HasPrefix(s, "Ctrl+"):
+			mods |= tcell.ModCtrl
+			s = s[len("Ctrl+"):]
+		case strings.HasPrefix(s, "Alt+"):
+			mods |= tcell.ModAlt
+			s = s[len("Alt+"):]
+		case strings.HasPrefix(s, "Shift+"):
+			mods |= tcell.ModShift
+			s = s[len("Shift+"):]
+		default:
+			return KeyChord{}, false
+		}
+	}
+	return KeyChord{}, false
+}
+
+// 💡 최종 편집 switch 가 소유한 키들. 여기에 액션을 얹으면 타이핑/커서 이동이 죽는다.
+// Alt 가 붙은 형태는 그 switch 에 닿지 않으므로 자유롭게 바인딩할 수 있다
+// (Alt+Up/Alt+Down 이 실제로 줄 이동 기본값인 이유).
+func reservedChord(c KeyChord) bool {
+	c = normalizeChord(c)
+	if c.isZero() {
+		return true
+	}
+	if c.Mods&tcell.ModAlt != 0 {
+		return false
+	}
+	switch c.Key {
+	case tcell.KeyRune,
+		tcell.KeyLeft, tcell.KeyRight, tcell.KeyUp, tcell.KeyDown,
+		tcell.KeyHome, tcell.KeyEnd, tcell.KeyPgUp, tcell.KeyPgDn,
+		tcell.KeyEnter, tcell.KeyTab, tcell.KeyBacktab,
+		tcell.KeyBackspace, tcell.KeyBackspace2, tcell.KeyDelete,
+		tcell.KeyEscape, tcell.KeyInsert:
+		return true
+	}
+	return false
+}
+
+// ActionDef 는 리바인딩 가능한 액션 하나. ID 는 config.json 에 그대로 쓰이므로
+// 한 번 정하면 바꾸지 않는다.
+type ActionDef struct {
+	ID   string
+	Name string
+	Def  KeyChord // 기본 바인딩
+	Fn   EditorAction
+
+	NoSnap   bool // 실행 후 snapToCursor = false (화면 점프 방지)
+	Mutates  bool // isReadOnly 버퍼에서 차단
+	PreModal bool // 팔레트/검색창/프롬프트보다 먼저 처리
+}
+
+const actionIDPalette = "palette"
+
+func ctrlChord(k tcell.Key) KeyChord    { return KeyChord{Key: k} }
+func altRuneChord(r rune) KeyChord      { return KeyChord{Key: tcell.KeyRune, Rune: r, Mods: tcell.ModAlt} }
+func plainChord(k tcell.Key) KeyChord   { return KeyChord{Key: k} }
+func altChord(k tcell.Key) KeyChord     { return KeyChord{Key: k, Mods: tcell.ModAlt} }
+func ctrlAltChord(k tcell.Key) KeyChord { return KeyChord{Key: k, Mods: tcell.ModCtrl | tcell.ModAlt} }
+
+// Actions 의 순서가 곧 단축키 설정 메뉴의 표시 순서다.
+// 💡 var 초기화식이 아니라 init() 에서 채운다: 액션 클로저가 applyConfig ->
+// initPalette -> showKeybindMenu -> Actions 로 되돌아와 초기화 사이클이 된다.
+var Actions []ActionDef
+
+var actionByID map[string]*ActionDef
+
+func init() {
+	Actions = []ActionDef{
+		{ID: "open", Name: "파일 열기 (Open)", Def: ctrlChord(tcell.KeyCtrlO),
+			Fn: func(e *Editor, s tcell.Screen) { e.openFile(s) }},
+
+		{ID: "save", Name: "저장 (Save)", Def: ctrlChord(tcell.KeyCtrlS), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) { e.saveActiveFile(s) }},
+
+		{ID: "save_as", Name: "다른 이름으로 저장 (Save As)", Def: plainChord(tcell.KeyF12), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) { e.saveAsFile(s) }},
+
+		{ID: "new_tab", Name: "새 탭 열기 (New Tab)", Def: ctrlChord(tcell.KeyCtrlN), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				e.buffers = append(e.buffers, NewBuffer())
+				e.activeBuffer = len(e.buffers) - 1
+			}},
+
+		{ID: "close_tab", Name: "현재 탭 닫기 (Close Tab)", Def: ctrlChord(tcell.KeyCtrlW), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				b := e.getActive()
+				if b.isModified {
+					e.promptMode = true
+					e.promptType = "close"
+					e.targetCloseBuffer = e.activeBuffer
+					return
+				}
+				if len(e.buffers) <= 1 {
+					shuttingDown.Store(true)
+					s.Fini()
+					os.Exit(0)
+				}
+				e.closeBuffer(e.activeBuffer)
+				e.needsFullRefresh = true
+			}},
+
+		{ID: "next_tab", Name: "다음 탭 (Next Tab)", Def: altRuneChord('.'), NoSnap: true, PreModal: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				e.activeBuffer = (e.activeBuffer + 1) % len(e.buffers)
+				e.needsFullRefresh = true
+			}},
+
+		{ID: "prev_tab", Name: "이전 탭 (Prev Tab)", Def: altRuneChord(','), NoSnap: true, PreModal: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				e.activeBuffer = (e.activeBuffer - 1 + len(e.buffers)) % len(e.buffers)
+				e.needsFullRefresh = true
+			}},
+
+		{ID: "cycle_tab", Name: "탭 순환 (Cycle Tab)", Def: ctrlChord(tcell.KeyCtrlBackslash), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) { e.activeBuffer = (e.activeBuffer + 1) % len(e.buffers) }},
+
+		{ID: "undo", Name: "실행 취소 (Undo)", Def: ctrlChord(tcell.KeyCtrlZ),
+			Fn: func(e *Editor, s tcell.Screen) { e.getActive().Undo() }},
+
+		{ID: "redo", Name: "다시 실행 (Redo)", Def: ctrlChord(tcell.KeyCtrlY),
+			Fn: func(e *Editor, s tcell.Screen) { e.getActive().Redo() }},
+
+		{ID: "select_all", Name: "모두 선택 (Select All)", Def: ctrlChord(tcell.KeyCtrlA), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) { e.getActive().selectAll() }},
+
+		{ID: "copy", Name: "복사 (Copy)", Def: ctrlChord(tcell.KeyCtrlC), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				// ponytail(CM6): copy every live selection (primary + each extra
+				// cursor's own), not just the primary's -- see getMultiSelectedText.
+				text := e.getActive().getMultiSelectedText()
+				if text != "" {
+					_ = clipboard.WriteAll(text)
+				}
+			}},
+
+		{ID: "cut", Name: "잘라내기 (Cut)", Def: ctrlChord(tcell.KeyCtrlX),
+			Fn: func(e *Editor, s tcell.Screen) {
+				b := e.getActive()
+				if b.isReadOnly {
+					return
+				}
+				text := b.getMultiSelectedText()
+				if text != "" {
+					_ = clipboard.WriteAll(text)
+					b.BeginTransaction()
+					b.DeleteSelection()
+					b.EndTransaction()
+				}
+			}},
+
+		{ID: "paste", Name: "붙여넣기 (Paste)", Def: ctrlChord(tcell.KeyCtrlV),
+			Fn: func(e *Editor, s tcell.Screen) {
+				b := e.getActive()
+				if b.isReadOnly {
+					return
+				}
+				text, err := clipboard.ReadAll()
+				if err == nil && text != "" {
+					text = strings.ReplaceAll(text, "\r\n", "\n")
+					b.BeginTransaction()
+					b.DeleteSelection()
+					// ponytail(CM6): if the clipboard splits into exactly one line per
+					// live caret, give each caret its own line (in document order)
+					// instead of pasting the whole blob at every caret -- mirrors
+					// CodeMirror 6's "byLine" paste, the round-trip counterpart of
+					// copying from N selections (getMultiSelectedText). Any other line
+					// count falls back to the old "same text everywhere" paste, which
+					// is also CM6's own fallback for a non-matching line count.
+					cursorCount := 1 + len(b.extraCursors)
+					parts := strings.Split(text, "\n")
+					if cursorCount > 1 && len(parts) == cursorCount {
+						rank := b.cursorRankMap()
+						b.runMultiCursorInsert(func(loc Loc, _ bool) string { return parts[rank[loc]] })
+					} else {
+						b.runMultiCursorInsert(func(Loc, bool) string { return text })
+					}
+					b.EndTransaction()
+				}
+			}},
+
+		{ID: "find", Name: "찾기 (Find)", Def: ctrlChord(tcell.KeyCtrlF), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				b := e.getActive()
+				b.clearSelection()
+				b.searchMode = true
+				b.isReplace = false
+				b.replaceStep = 0
+				b.searchQuery = []rune{}
+				b.replaceQuery = []rune{}
+				b.matches = []MatchInfo{}
+				b.matchIdx = -1
+				b.inputCX = 0
+				b.isInputSelect = false
+			}},
+
+		{ID: "replace", Name: "바꾸기 (Replace)", Def: ctrlChord(tcell.KeyCtrlR), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				b := e.getActive()
+				b.clearSelection()
+				b.searchMode = true
+				b.isReplace = true
+				b.replaceStep = 1
+				b.searchQuery = []rune{}
+				b.replaceQuery = []rune{}
+				b.matches = []MatchInfo{}
+				b.matchIdx = -1
+				b.inputCX = 0
+				b.isInputSelect = false
+			}},
+
+		{ID: "goto_line", Name: "줄 이동 (Go To Line)", Def: ctrlChord(tcell.KeyCtrlG), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				b := e.getActive()
+				b.clearSelection()
+				b.searchMode = false
+				b.gotoMode = true
+				b.gotoInput = []rune{}
+				b.inputCX = 0
+				b.isInputSelect = false
+			}},
+
+		{ID: "move_line_up", Name: "줄 위로 이동 (Move Line Up)", Def: altChord(tcell.KeyUp), Mutates: true,
+			Fn: func(e *Editor, s tcell.Screen) { e.getActive().moveLineUp() }},
+
+		{ID: "move_line_down", Name: "줄 아래로 이동 (Move Line Down)", Def: altChord(tcell.KeyDown), Mutates: true,
+			Fn: func(e *Editor, s tcell.Screen) { e.getActive().moveLineDown() }},
+
+		{ID: "add_cursor_above", Name: "위에 커서 추가 (Add Cursor Above)", Def: ctrlAltChord(tcell.KeyUp),
+			Fn: func(e *Editor, s tcell.Screen) { e.getActive().addCursorAbove(e.cfg) }},
+
+		{ID: "add_cursor_below", Name: "아래에 커서 추가 (Add Cursor Below)", Def: ctrlAltChord(tcell.KeyDown),
+			Fn: func(e *Editor, s tcell.Screen) { e.getActive().addCursorBelow(e.cfg) }},
+
+		{ID: "insert_time", Name: "시간 삽입 (Insert Time)", Def: plainChord(tcell.KeyF5),
+			Fn: func(e *Editor, s tcell.Screen) {
+				b := e.getActive()
+				if b.isReadOnly {
+					return
+				}
+				b.BeginTransaction()
+				b.DeleteSelection()
+				goLayout := convertLinuxDateToGoLayout(e.cfg.DateFormat)
+				b.InsertTextWithRecord(b.cursor, time.Now().Format(goLayout))
+				b.EndTransaction()
+			}},
+
+		{ID: actionIDPalette, Name: "커맨드 팔레트 (Command Palette)", Def: ctrlChord(tcell.KeyCtrlP), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				e.paletteActive = !e.paletteActive
+				e.paletteCursor = 0
+				e.menuScrollOffset = 0
+				e.ctxMenuActive = false
+				e.encodeMenuActive = false
+				e.closeKeybindMenu()
+			}},
+
+		{ID: "toggle_config", Name: "설정 파일 편집 (Toggle Config)", Def: ctrlChord(tcell.KeyCtrlT), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) { e.getActive().clearSelection(); e.toggleConfigBuffer() }},
+
+		{ID: "quit", Name: "에디터 종료 (Quit)", Def: ctrlChord(tcell.KeyCtrlQ), NoSnap: true,
+			Fn: func(e *Editor, s tcell.Screen) {
+				for _, b := range e.buffers {
+					if b.isModified {
+						e.promptMode = true
+						e.promptType = "quit"
+						return
+					}
+				}
+				shuttingDown.Store(true)
+				s.Fini()
+				os.Exit(0)
+			}},
+	}
+
+	actionByID = make(map[string]*ActionDef, len(Actions))
+	for i := range Actions {
+		actionByID[Actions[i].ID] = &Actions[i]
+	}
+}
+
+// buildBindings 는 기본값 위에 cfg.Keybindings 오버라이드를 얹어 라이브 표를 만든다.
+// config.json 은 손으로 편집할 수 있으므로 방어적으로 동작한다: 파싱 실패, 미지 ID,
+// 예약 키는 조용히 무시하고 기본값을 유지한다.
+//
+// 배치는 반드시 "먼저 전부 비우고, 그 다음 전부 놓기" 두 단계여야 한다.
+// 한 번에 하나씩 처리하면 두 액션이 서로의 키를 맞바꾼 설정(A=B의 기본값,
+// B=A의 기본값)이 양쪽 다 충돌로 거부되어 통째로 기본값으로 되돌아간다.
+func buildBindings(cfg Config) (map[KeyChord]*ActionDef, map[string]KeyChord) {
+	byID := make(map[string]KeyChord, len(Actions))
+	occupied := make(map[KeyChord]string, len(Actions))
+	for i := range Actions {
+		a := &Actions[i]
+		c := normalizeChord(a.Def)
+		byID[a.ID] = c
+		if !c.isZero() {
+			occupied[c] = a.ID
+		}
+	}
+
+	// 맵 순회 순서가 결과를 바꾸지 않도록 ID 를 정렬해 적용한다.
+	ids := make([]string, 0, len(cfg.Keybindings))
+	for id := range cfg.Keybindings {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	type pendingBind struct {
+		id    string
+		chord KeyChord
+	}
+	pending := make([]pendingBind, 0, len(ids))
+	for _, id := range ids {
+		if _, known := actionByID[id]; !known {
+			continue
+		}
+		chord, ok := parseChord(cfg.Keybindings[id])
+		if !ok {
+			continue
+		}
+		if chord.isZero() {
+			if id == actionIDPalette {
+				continue // 팔레트를 해제하면 되돌릴 길이 사라진다
 			}
+		} else if reservedChord(chord) {
+			continue
 		}
-		shuttingDown.Store(true)
-		s.Fini()
-		os.Exit(0)
-	},
-	tcell.KeyCtrlT: func(e *Editor, s tcell.Screen) { e.getActive().clearSelection(); e.toggleConfigBuffer() },
-	tcell.KeyCtrlS: func(e *Editor, s tcell.Screen) { e.saveActiveFile(s) },
-	tcell.KeyCtrlO: func(e *Editor, s tcell.Screen) { e.openFile(s) },
-	tcell.KeyF12:   func(e *Editor, s tcell.Screen) { e.saveAsFile(s) },
-	tcell.KeyCtrlP: func(e *Editor, s tcell.Screen) {
-		e.paletteActive = !e.paletteActive
-		e.paletteCursor = 0
-		e.ctxMenuActive = false
-		e.encodeMenuActive = false
-	},
-	tcell.KeyCtrlA: func(e *Editor, s tcell.Screen) { e.getActive().selectAll() },
-	tcell.KeyCtrlZ: func(e *Editor, s tcell.Screen) { e.getActive().Undo() },
-	tcell.KeyCtrlY: func(e *Editor, s tcell.Screen) { e.getActive().Redo() },
-	tcell.KeyCtrlC: func(e *Editor, s tcell.Screen) {
-		// ponytail(CM6): copy every live selection (primary + each extra
-		// cursor's own), not just the primary's -- see getMultiSelectedText.
-		text := e.getActive().getMultiSelectedText()
-		if text != "" {
-			_ = clipboard.WriteAll(text)
+		pending = append(pending, pendingBind{id, chord})
+	}
+
+	// 1단계: 오버라이드 대상 액션들의 현재 점유를 모두 비운다 (자리 맞바꾸기 허용).
+	for _, p := range pending {
+		delete(occupied, byID[p.id])
+		byID[p.id] = KeyChord{}
+	}
+	// 2단계: 배치. 남이 이미 쓰는 chord 면 무시한다.
+	for _, p := range pending {
+		if p.chord.isZero() {
+			continue
 		}
-	},
-	tcell.KeyCtrlX: func(e *Editor, s tcell.Screen) {
-		b := e.getActive()
-		if b.isReadOnly {
-			return
+		if holder, dup := occupied[p.chord]; dup && holder != p.id {
+			continue
 		}
-		text := b.getMultiSelectedText()
-		if text != "" {
-			_ = clipboard.WriteAll(text)
-			b.BeginTransaction()
-			b.DeleteSelection()
-			b.EndTransaction()
+		byID[p.id] = p.chord
+		occupied[p.chord] = p.id
+	}
+	// 3단계: 2단계에서 거부당한 액션은 기본값이 아직 비어 있으면 되돌려 준다.
+	for _, p := range pending {
+		if p.chord.isZero() || !byID[p.id].isZero() {
+			continue
 		}
-	},
-	tcell.KeyCtrlV: func(e *Editor, s tcell.Screen) {
-		b := e.getActive()
-		if b.isReadOnly {
-			return
+		def := normalizeChord(actionByID[p.id].Def)
+		if _, dup := occupied[def]; dup {
+			continue
 		}
-		text, err := clipboard.ReadAll()
-		if err == nil && text != "" {
-			text = strings.ReplaceAll(text, "\r\n", "\n")
-			b.BeginTransaction()
-			b.DeleteSelection()
-			// ponytail(CM6): if the clipboard splits into exactly one line per
-			// live caret, give each caret its own line (in document order)
-			// instead of pasting the whole blob at every caret -- mirrors
-			// CodeMirror 6's "byLine" paste, the round-trip counterpart of
-			// copying from N selections (getMultiSelectedText). Any other line
-			// count falls back to the old "same text everywhere" paste, which
-			// is also CM6's own fallback for a non-matching line count.
-			cursorCount := 1 + len(b.extraCursors)
-			parts := strings.Split(text, "\n")
-			if cursorCount > 1 && len(parts) == cursorCount {
-				rank := b.cursorRankMap()
-				b.runMultiCursorInsert(func(loc Loc, _ bool) string { return parts[rank[loc]] })
-			} else {
-				b.runMultiCursorInsert(func(Loc, bool) string { return text })
-			}
-			b.EndTransaction()
+		byID[p.id] = def
+		occupied[def] = p.id
+	}
+
+	byChord := make(map[KeyChord]*ActionDef, len(byID))
+	for id, c := range byID {
+		if c.isZero() {
+			continue
 		}
-	},
-	tcell.KeyCtrlN: func(e *Editor, s tcell.Screen) {
-		e.buffers = append(e.buffers, NewBuffer())
-		e.activeBuffer = len(e.buffers) - 1
-	},
-	tcell.KeyCtrlW: func(e *Editor, s tcell.Screen) {
-		b := e.getActive()
-		if b.isModified {
-			e.promptMode = true
-			e.promptType = "close"
-			e.targetCloseBuffer = e.activeBuffer
-			return
+		byChord[c] = actionByID[id]
+	}
+	return byChord, byID
+}
+
+// keybindOverrides 는 기본값과 다른 항목만 뽑아 config.json 에 기록할 맵을 만든다.
+// 기본값과 같은 항목까지 쓰면 나중에 기본값을 바꿔도 사용자 파일이 옛 값을 붙잡는다.
+func keybindOverrides(byID map[string]KeyChord) map[string]string {
+	out := map[string]string{}
+	for i := range Actions {
+		a := &Actions[i]
+		c, ok := byID[a.ID]
+		if !ok {
+			continue
 		}
-		if len(e.buffers) <= 1 {
-			shuttingDown.Store(true)
-			s.Fini()
-			os.Exit(0)
+		if normalizeChord(c) == normalizeChord(a.Def) {
+			continue
 		}
-		e.closeBuffer(e.activeBuffer)
-		e.needsFullRefresh = true
-	},
-	tcell.KeyCtrlBackslash: func(e *Editor, s tcell.Screen) { e.activeBuffer = (e.activeBuffer + 1) % len(e.buffers) },
-	tcell.KeyCtrlF: func(e *Editor, s tcell.Screen) {
-		b := e.getActive()
-		b.clearSelection()
-		b.searchMode = true
-		b.isReplace = false
-		b.replaceStep = 0
-		b.searchQuery = []rune{}
-		b.replaceQuery = []rune{}
-		b.matches = []MatchInfo{}
-		b.matchIdx = -1
-		b.inputCX = 0
-		b.isInputSelect = false
-	},
-	tcell.KeyCtrlR: func(e *Editor, s tcell.Screen) {
-		b := e.getActive()
-		b.clearSelection()
-		b.searchMode = true
-		b.isReplace = true
-		b.replaceStep = 1
-		b.searchQuery = []rune{}
-		b.replaceQuery = []rune{}
-		b.matches = []MatchInfo{}
-		b.matchIdx = -1
-		b.inputCX = 0
-		b.isInputSelect = false
-	},
+		out[a.ID] = chordString(c)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // --- [ CLI 엔진 및 파서 상태 ] ---
@@ -4848,7 +5527,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.3.1 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.3.2 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -5033,7 +5712,7 @@ func main() {
 								if buf.isConfig {
 									var newCfg Config
 									if err := json.Unmarshal([]byte(buf.getContent()), &newCfg); err == nil {
-										editor.cfg = newCfg
+										editor.applyConfig(newCfg)
 									}
 								}
 								needsLayout = true
@@ -5080,7 +5759,7 @@ func main() {
 				lastClickX, lastClickY = mx, my
 			}
 
-			if (buttons&tcell.Button3 != 0 || buttons&tcell.Button2 != 0) && !editor.paletteActive {
+			if (buttons&tcell.Button3 != 0 || buttons&tcell.Button2 != 0) && !editor.paletteActive && !editor.keyMenuActive {
 				// 💡 우클릭 시 우클릭한 위치로 커서(I-빔) 이동
 				if my >= editor.tabHeight && my < h-1 {
 					loc := b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
@@ -5261,6 +5940,93 @@ func main() {
 				} else if isNewPress {
 					editor.encodeMenuActive = false
 					editor.encodeMenuState = 0
+					needsLayout = true
+				}
+				continue
+			}
+
+			if editor.keyMenuActive {
+				inMenu := mx >= editor.keyMenuX && mx < editor.keyMenuX+editor.keyMenuW && my >= editor.keyMenuY && my < editor.keyMenuY+editor.keyMenuH
+
+				// 💡 캡처 화면에서는 마우스로 할 수 있는 일이 "취소" 뿐이다.
+				if editor.keyMenuState == 2 {
+					if isNewPress && !inMenu {
+						editor.backToKeybindList()
+						needsLayout = true
+					}
+					continue
+				}
+
+				if inMenu {
+					_, screenH := currentScreen.Size()
+					pageStep := screenH - 6
+					if pageStep < 5 {
+						pageStep = 5
+					}
+					visibleItems := editor.keyMenuH - 2
+					maxOffset := len(editor.keyMenuItems) - visibleItems
+					if maxOffset < 0 {
+						maxOffset = 0
+					}
+
+					if isWheel {
+						if buttons&tcell.WheelUp != 0 {
+							editor.menuScrollOffset -= 3
+							if editor.menuScrollOffset < 0 {
+								editor.menuScrollOffset = 0
+							}
+							needsLayout = true
+						} else if buttons&tcell.WheelDown != 0 {
+							editor.menuScrollOffset += 3
+							if editor.menuScrollOffset > maxOffset {
+								editor.menuScrollOffset = maxOffset
+							}
+							needsLayout = true
+						}
+						continue
+					}
+
+					if isNewPress {
+						// 💡 테두리에 그려진 ▲/▼ 화살표 클릭 = 페이지 스크롤
+						if my == editor.keyMenuY && mx >= editor.keyMenuX+editor.keyMenuW-4 && mx <= editor.keyMenuX+editor.keyMenuW-2 {
+							editor.menuScrollOffset -= pageStep
+							if editor.menuScrollOffset < 0 {
+								editor.menuScrollOffset = 0
+							}
+							needsLayout = true
+							continue
+						}
+						if my == editor.keyMenuY+editor.keyMenuH-1 && mx >= editor.keyMenuX+editor.keyMenuW-4 && mx <= editor.keyMenuX+editor.keyMenuW-2 {
+							editor.menuScrollOffset += pageStep
+							if editor.menuScrollOffset > maxOffset {
+								editor.menuScrollOffset = maxOffset
+							}
+							needsLayout = true
+							continue
+						}
+					}
+
+					clickIdx := my - editor.keyMenuY - 1
+					if clickIdx >= 0 && clickIdx < visibleItems {
+						targetItemIdx := editor.menuScrollOffset + clickIdx
+						if targetItemIdx >= 0 && targetItemIdx < len(editor.keyMenuItems) {
+							if mouseMoved {
+								editor.keyMenuCursor = targetItemIdx
+								needsLayout = true
+							}
+							if isNewPress {
+								editor.keyMenuCursor = targetItemIdx
+								// 💡 팔레트/인코딩 메뉴와 달리 메뉴를 닫지 않는다 —
+								// 항목 선택은 캡처 화면으로 넘어가는 것이지 종료가 아니다.
+								if action := editor.keyMenuItems[targetItemIdx].Action; action != nil {
+									action(editor, currentScreen)
+								}
+								needsLayout = true
+							}
+						}
+					}
+				} else if isNewPress {
+					editor.closeKeybindMenu()
 					needsLayout = true
 				}
 				continue
@@ -5781,19 +6547,15 @@ func main() {
 				b.stickToWrapEnd = false
 			}
 
-			// 💡 탭 좌우 이동 시 화면 렌더링 캐시 동기화
-			if isAlt && ev.Rune() == ',' {
-				editor.activeBuffer = (editor.activeBuffer - 1 + len(editor.buffers)) % len(editor.buffers)
-				editor.needsFullRefresh = true
+			// 💡 PreModal 액션(탭 전환)은 팔레트/검색창/프롬프트가 열려 있어도 동작한다.
+			// 여기서 처리하지 않으면 검색 중 Alt+. 로 탭을 넘길 수 없게 된다.
+			evChord := chordFromEvent(ev)
+			if act := editor.bindings[evChord]; act != nil && act.PreModal {
+				act.Fn(editor, currentScreen)
 				needsLayout = true
-				snapToCursor = false // 💡 탭 전환 시 화면 점프 방지
-				continue
-			}
-			if isAlt && ev.Rune() == '.' {
-				editor.activeBuffer = (editor.activeBuffer + 1) % len(editor.buffers)
-				editor.needsFullRefresh = true
-				needsLayout = true
-				snapToCursor = false // 💡 탭 전환 시 화면 점프 방지
+				if act.NoSnap {
+					snapToCursor = false
+				}
 				continue
 			}
 
@@ -5851,10 +6613,13 @@ func main() {
 						editor.needsFullRefresh = true
 						needsLayout = true
 					} else if editor.promptType == "reset_config" {
+						// 💡 단축키는 건드리지 않는다 — 그건 "모든 단축키 기본값으로
+						// 되돌리기" 전용 액션의 몫이다. 합쳐 놓으면 화면 설정 하나
+						// 초기화하려다 애써 바꾼 단축키까지 통째로 날아간다.
 						defaultCfg := DefaultConfig()
-						data, _ := json.MarshalIndent(defaultCfg, "", "    ")
-						_ = os.WriteFile(getConfigPath(), data, 0644)
-						editor.cfg = defaultCfg
+						defaultCfg.Keybindings = editor.cfg.Keybindings
+						_ = SaveConfig(defaultCfg)
+						editor.applyConfig(defaultCfg)
 						for _, buf := range editor.buffers {
 							if buf.isConfig {
 								buf.isModified = false
@@ -5862,6 +6627,17 @@ func main() {
 							}
 						}
 						editor.needsFullRefresh = true
+						needsLayout = true
+					} else if editor.promptType == "reset_keybinds" {
+						// 💡 단축키만 전부 기본값으로. 나머지 설정은 건드리지 않는다.
+						cfg := editor.cfg
+						cfg.Keybindings = nil
+						editor.applyConfig(cfg)
+						_ = SaveConfig(editor.cfg)
+						editor.syncConfigBuffers()
+						if editor.keyMenuActive {
+							editor.showKeybindMenu()
+						}
 						needsLayout = true
 					} else if editor.promptType == "reopen" {
 						editor.getActive().reopenWithEncoding(editor.targetEncoding)
@@ -5885,7 +6661,7 @@ func main() {
 							if bufToReload.isConfig {
 								var newCfg Config
 								if err := json.Unmarshal([]byte(bufToReload.getContent()), &newCfg); err == nil {
-									editor.cfg = newCfg
+									editor.applyConfig(newCfg)
 								}
 							}
 						}
@@ -6063,6 +6839,77 @@ func main() {
 						editor.menuScrollOffset = editor.encodeMenuCursor - visibleItems + 1
 					}
 				}
+				needsLayout = true
+				continue
+			}
+
+			if editor.keyMenuActive {
+				snapToCursor = false // 💡 메뉴 조작 및 종료 시 화면 점프 방지
+
+				// 💡 state 2: 새 키 캡처. 여기서는 모든 키 입력을 삼킨다.
+				if editor.keyMenuState == 2 {
+					switch ev.Key() {
+					case tcell.KeyEscape:
+						editor.backToKeybindList()
+					case tcell.KeyDelete:
+						if a, ok := actionByID[editor.keyMenuTargetID]; ok {
+							editor.commitKeybind(a.ID, a.Def) // 기본값 복원
+						}
+					case tcell.KeyBackspace, tcell.KeyBackspace2:
+						editor.commitKeybind(editor.keyMenuTargetID, KeyChord{}) // 해제
+					default:
+						editor.commitKeybind(editor.keyMenuTargetID, chordFromEvent(ev))
+					}
+					needsLayout = true
+					continue
+				}
+
+				_, screenH := currentScreen.Size()
+				pageStep := screenH - 6
+				if pageStep < 5 {
+					pageStep = 5
+				}
+
+				switch ev.Key() {
+				case tcell.KeyEscape:
+					editor.closeKeybindMenu()
+				case tcell.KeyUp:
+					editor.keyMenuCursor--
+					if editor.keyMenuCursor < 0 {
+						editor.keyMenuCursor = len(editor.keyMenuItems) - 1
+					}
+				case tcell.KeyDown:
+					editor.keyMenuCursor++
+					if editor.keyMenuCursor >= len(editor.keyMenuItems) {
+						editor.keyMenuCursor = 0
+					}
+				case tcell.KeyPgUp:
+					editor.keyMenuCursor -= pageStep
+					if editor.keyMenuCursor < 0 {
+						editor.keyMenuCursor = 0
+					}
+				case tcell.KeyPgDn:
+					editor.keyMenuCursor += pageStep
+					if editor.keyMenuCursor >= len(editor.keyMenuItems) {
+						editor.keyMenuCursor = len(editor.keyMenuItems) - 1
+					}
+				case tcell.KeyEnter:
+					if editor.keyMenuCursor >= 0 && editor.keyMenuCursor < len(editor.keyMenuItems) {
+						if action := editor.keyMenuItems[editor.keyMenuCursor].Action; action != nil {
+							action(editor, currentScreen)
+						}
+					}
+				case tcell.KeyRune:
+					if idx := getMenuJumpIdx(editor.keyMenuItems, ev.Rune(), editor.keyMenuCursor); idx != -1 {
+						editor.keyMenuCursor = idx
+					}
+				}
+
+				// 💡 자동 스크롤 추적 보정 (캡처 화면으로 넘어갔으면 건드리지 않는다)
+				if editor.keyMenuState == 1 {
+					editor.followKeybindCursor()
+				}
+				editor.needsFullRefresh = true
 				needsLayout = true
 				continue
 			}
@@ -6418,52 +7265,25 @@ func main() {
 				if k == tcell.KeyRune || k == tcell.KeyEnter || k == tcell.KeyBackspace || k == tcell.KeyBackspace2 || k == tcell.KeyDelete || k == tcell.KeyTab {
 					continue
 				}
-				if isAlt && (k == tcell.KeyUp || k == tcell.KeyDown) { // 줄 이동 단축키 차단
+				// 💡 줄 이동처럼 내용을 고치는 액션은 어디에 바인딩돼 있든 차단한다.
+				if act := editor.bindings[evChord]; act != nil && act.Mutates {
 					continue
 				}
 			}
 
-			// ponytail: Ctrl+Alt+Up/Down — add cursor above/below
-			if isCtrl && isAlt && ev.Key() == tcell.KeyUp {
-				b.addCursorAbove(editor.cfg)
+			// 💡 통합 단축키 디스팩치.
+			// 아래 Shift 선택 앵커 블록보다 반드시 먼저 와야 한다 — 그 블록은 modifier 를
+			// 보지 않고 Up/Down/Left/... 만 검사하므로, Alt+Up(줄 이동) 같은 액션이
+			// 뒤에서 처리되면 없던 clearSelection() 부작용이 붙는다.
+			if act := editor.bindings[evChord]; act != nil {
+				act.Fn(editor, currentScreen)
 				needsLayout = true
-				continue
-			}
-			if isCtrl && isAlt && ev.Key() == tcell.KeyDown {
-				b.addCursorBelow(editor.cfg)
-				needsLayout = true
-				continue
-			}
-
-			if isAlt && ev.Key() == tcell.KeyUp {
-
-				if b.cursor.L > 0 {
-					oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
-					b.BeginTransaction()
-					currStr := string(b.lines[oldL])
-					prevStr := string(b.lines[oldL-1])
-					b.DeleteTextWithRecord(Loc{L: oldL - 1, C: 0, TargetX: -1}, Loc{L: oldL, C: len(b.lines[oldL]), TargetX: -1})
-					b.InsertTextWithRecord(Loc{L: oldL - 1, C: 0, TargetX: -1}, currStr+"\n"+prevStr)
-					b.cursor = b.clampLoc(Loc{L: oldL - 1, C: oldC, TargetX: -1}) // 💡 절대 에러 방지
-					b.EndTransaction()
-					needsLayout = true
+				if act.NoSnap {
+					snapToCursor = false // 💡 비이동/비편집 단축키의 화면 점프 방지
 				}
 				continue
 			}
-			if isAlt && ev.Key() == tcell.KeyDown {
-				if b.cursor.L < len(b.lines)-1 {
-					oldL, oldC := b.cursor.L, b.cursor.C // 💡 안전하게 원본 위치 캡처
-					b.BeginTransaction()
-					currStr := string(b.lines[oldL])
-					nextStr := string(b.lines[oldL+1])
-					b.DeleteTextWithRecord(Loc{L: oldL, C: 0, TargetX: -1}, Loc{L: oldL + 1, C: len(b.lines[oldL+1]), TargetX: -1})
-					b.InsertTextWithRecord(Loc{L: oldL, C: 0, TargetX: -1}, nextStr+"\n"+currStr)
-					b.cursor = b.clampLoc(Loc{L: oldL + 1, C: oldC, TargetX: -1}) // 💡 절대 에러 방지
-					b.EndTransaction()
-					needsLayout = true
-				}
-				continue
-			}
+
 			if ev.Key() == tcell.KeyLeft || ev.Key() == tcell.KeyRight || ev.Key() == tcell.KeyUp || ev.Key() == tcell.KeyDown || ev.Key() == tcell.KeyHome || ev.Key() == tcell.KeyEnd || ev.Key() == tcell.KeyPgUp || ev.Key() == tcell.KeyPgDn {
 				if !isShift {
 					b.clearSelection()
@@ -6480,19 +7300,6 @@ func main() {
 						}
 					}
 				}
-			}
-
-			if action, exists := ActionMap[ev.Key()]; exists {
-				action(editor, currentScreen)
-				needsLayout = true
-				// 💡 화면 점프 방지가 필요한 특정 비이동/비편집 단축키 목록
-				switch ev.Key() {
-				case tcell.KeyCtrlA, tcell.KeyCtrlC, tcell.KeyCtrlS, tcell.KeyF12,
-					tcell.KeyCtrlP, tcell.KeyCtrlF, tcell.KeyCtrlR, tcell.KeyCtrlG,
-					tcell.KeyCtrlT, tcell.KeyCtrlW, tcell.KeyCtrlQ, tcell.KeyCtrlBackslash, tcell.KeyCtrlN:
-					snapToCursor = false
-				}
-				continue
 			}
 
 			switch ev.Key() {
