@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"strings"
+)
 
 // --- [ 다국어 카탈로그 ] ---
 //
@@ -31,6 +35,22 @@ var currentLang = LangEN
 
 // msgs 는 항상 non-nil 인 활성 카탈로그다.
 var msgs = langEN
+
+// detectDefaultLanguage 는 시스템 로케일(LC_ALL/LC_MESSAGES/LANG)이 한국어면 "ko",
+// 그 외에는 "en" 을 반환한다. config.json 에 language 항목이 없을 때의 기본값이다.
+func detectDefaultLanguage() string {
+	for _, envKey := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
+		val := strings.ToLower(strings.TrimSpace(os.Getenv(envKey)))
+		if val == "" {
+			continue
+		}
+		if strings.HasPrefix(val, "ko") {
+			return string(LangKO)
+		}
+		return string(LangEN)
+	}
+	return string(LangEN)
+}
 
 // setLanguage 는 config 의 언어 코드를 적용한다. 모르는 값이나 빈 값은 영어로
 // 떨어진다. e.applyConfig 가 유일한 호출 경로다 (CLI 도움말 출력은 예외).
@@ -97,6 +117,15 @@ var langEN = map[string]string{
 	"action.palette":          "Command Palette",
 	"action.toggle_config":    "Edit Config File",
 	"action.quit":             "Quit Editor",
+	"action.fp_back":          "[File Picker] Back",
+	"action.fp_forward":       "[File Picker] Forward",
+	"action.fp_parent":        "[File Picker] Parent Directory",
+	"action.fp_home":          "[File Picker] Home Directory",
+	"action.fp_refresh":       "[File Picker] Refresh",
+	"action.fp_toggle_hidden": "[File Picker] Toggle Hidden Files",
+	"action.fp_edit_path":     "[File Picker] Edit Path",
+	"action.fp_filter":        "[File Picker] Filter",
+	"action.fp_new_dir":       "[File Picker] New Folder",
 
 	// --- 메뉴 ---
 	"menu.palette.title":   " Command Palette ",
@@ -172,13 +201,69 @@ var langEN = map[string]string{
 	"keybind.err.reserved":       "%s is reserved by the editor and cannot be used",
 	"keybind.err.duplicate":      "%s is already assigned to '%s'",
 
-	// --- GUI(zenity) 대화상자 ---
-	"dialog.open.title":     "Open File",
-	"dialog.save_as.title":  "Save As",
-	"dialog.bigfile.title":  "Large File Warning",
-	"dialog.bigfile.body":   "This file is very large (%.1f MB).\nOpening it may be slow or may hang the editor. Continue?",
-	"dialog.bigfile.ok":     "Yes",
-	"dialog.bigfile.cancel": "No",
+	// --- TUI 대화상자 ---
+	"dialog.open.title":       "Open File",
+	"dialog.save_as.title":    "Save As",
+	"dialog.bigfile.title":    "Large File Warning",
+	"dialog.bigfile.body":     "This file is very large (%.1f MB).\nOpening it may be slow or may hang the editor. Continue?",
+	"dialog.bigfile.ok":       "Yes (Y)",
+	"dialog.bigfile.cancel":   "No (N)",
+	"dialog.overwrite.title":  "Overwrite File",
+	"dialog.overwrite.body":   "'%s' already exists.\nOverwrite it?",
+	"dialog.overwrite.ok":     "Overwrite (Y)",
+	"dialog.overwrite.cancel": "Cancel (N)",
+
+	// --- TUI 파일 피커 ---
+	"fp.title.open":          " Open File ",
+	"fp.title.open_ro":       " Open File (Read-Only) ",
+	"fp.title.save_as":       " Save As ",
+	"fp.btn.new_dir":         " + Dir ",
+	"fp.btn.hidden_on":       "[x] .* Hidden",
+	"fp.btn.hidden_off":      "[ ] .* Hidden",
+	"fp.btn.hidden_short_on": "[x].*",
+	"fp.btn.hidden_short_off": "[ ].*",
+	"fp.btn.open":            " Open ",
+	"fp.btn.save":            " Save ",
+	"fp.btn.create":          " Create ",
+	"fp.btn.cancel":          " Cancel ",
+	"fp.places.header":       "Places",
+	"fp.places.home":         "~ Home",
+	"fp.places.desktop":      "Desktop",
+	"fp.places.documents":    "Documents",
+	"fp.places.downloads":    "Downloads",
+	"fp.places.pictures":     "Pictures",
+	"fp.places.music":        "Music",
+	"fp.places.videos":       "Videos",
+	"fp.places.root":         "/ Root",
+	"fp.places.trash":        "Trash",
+	"fp.col.name":            "Name",
+	"fp.col.size":            "Size",
+	"fp.col.modified":        "Modified",
+	"fp.label.filter":        "Filter: ",
+	"fp.label.name":          "Name: ",
+	"fp.label.new_dir":       "New Dir: ",
+	"fp.empty.dir":           " (Empty directory)",
+	"fp.empty.filter":        " (No matching files or folders)",
+	"fp.summary.full":        " %d items (%d dirs, %d files) · %s ",
+	"fp.summary.short":       " %d (%dD, %dF) ",
+	"fp.hint.default":        " Alt+Left/Right:Back/Fwd  Tab:Pane  Ctrl+L:Path  Ctrl+N:NewDir  Ctrl+H:Hidden  Esc:Cancel ",
+	"fp.hint.nav":            "Back/Fwd",
+	"fp.hint.pane":           "Pane",
+	"fp.hint.path_lbl":       "Path",
+	"fp.hint.new_dir_lbl":    "NewDir",
+	"fp.hint.hidden_lbl":     "Hidden",
+	"fp.hint.cancel_lbl":     "Cancel",
+	"fp.hint.path":           " Enter:Go  Tab:Complete  Esc:Back ",
+	"fp.hint.new_dir":        " Enter:Create  Esc:Cancel ",
+	"fp.err.open_dir":        "Failed to open: %v",
+	"fp.err.empty_name":      "Please enter a file name.",
+	"fp.err.not_found":       "File not found: %s",
+	"fp.err.no_parent":       "Directory does not exist: %s",
+	"fp.err.path_not_found":  "Path not found: %s",
+	"fp.err.empty_dir_name":  "Please enter a folder name.",
+	"fp.err.invalid_dir_name": "Folder name cannot contain path separators or '.'/'..'.",
+	"fp.err.mkdir_failed":    "Failed to create folder: %v",
+	"fp.err.file_open":       "Failed to open file: %v",
 
 	// --- 오류 ---
 	"err.config_path":    "could not locate the config path",
@@ -234,6 +319,15 @@ var langKO = map[string]string{
 	"action.palette":          "커맨드 팔레트",
 	"action.toggle_config":    "설정 파일 편집",
 	"action.quit":             "에디터 종료",
+	"action.fp_back":          "[파일 피커] 뒤로 가기",
+	"action.fp_forward":       "[파일 피커] 앞으로 가기",
+	"action.fp_parent":        "[파일 피커] 상위 폴더",
+	"action.fp_home":          "[파일 피커] 홈 폴더",
+	"action.fp_refresh":       "[파일 피커] 새로고침",
+	"action.fp_toggle_hidden": "[파일 피커] 숨김 파일 표시",
+	"action.fp_edit_path":     "[파일 피커] 경로 편집",
+	"action.fp_filter":        "[파일 피커] 필터",
+	"action.fp_new_dir":       "[파일 피커] 새 폴더",
 
 	// --- 메뉴 ---
 	"menu.palette.title":   " 커맨드 팔레트 ",
@@ -307,13 +401,69 @@ var langKO = map[string]string{
 	"keybind.err.reserved":       "%s 는 편집기 예약 키라 사용할 수 없습니다",
 	"keybind.err.duplicate":      "%s 는 이미 '%s' 에 할당되어 있습니다",
 
-	// --- GUI(zenity) 대화상자 ---
-	"dialog.open.title":     "파일 열기",
-	"dialog.save_as.title":  "다른 이름으로 저장",
-	"dialog.bigfile.title":  "대용량 파일 경고",
-	"dialog.bigfile.body":   "파일 크기가 매우 큽니다 (%.1f MB).\n열면 속도가 느려지거나 멈출 수 있습니다. 계속 진행하시겠습니까?",
-	"dialog.bigfile.ok":     "예",
-	"dialog.bigfile.cancel": "아니오",
+	// --- TUI 대화상자 ---
+	"dialog.open.title":       "파일 열기",
+	"dialog.save_as.title":    "다른 이름으로 저장",
+	"dialog.bigfile.title":    "대용량 파일 경고",
+	"dialog.bigfile.body":     "파일 크기가 매우 큽니다 (%.1f MB).\n열면 속도가 느려지거나 멈출 수 있습니다. 계속 진행하시겠습니까?",
+	"dialog.bigfile.ok":       "예 (Y)",
+	"dialog.bigfile.cancel":   "아니오 (N)",
+	"dialog.overwrite.title":  "파일 덮어쓰기",
+	"dialog.overwrite.body":   "'%s' 파일이 이미 존재합니다.\n덮어쓰시겠습니까?",
+	"dialog.overwrite.ok":     "덮어쓰기 (Y)",
+	"dialog.overwrite.cancel": "취소 (N)",
+
+	// --- TUI 파일 피커 ---
+	"fp.title.open":          " 파일 열기 ",
+	"fp.title.open_ro":       " 파일 열기 (읽기 전용) ",
+	"fp.title.save_as":       " 다른 이름으로 저장 ",
+	"fp.btn.new_dir":         " + 폴더 ",
+	"fp.btn.hidden_on":       "[x] .* 숨김",
+	"fp.btn.hidden_off":      "[ ] .* 숨김",
+	"fp.btn.hidden_short_on": "[x].*",
+	"fp.btn.hidden_short_off": "[ ].*",
+	"fp.btn.open":            " 열기 ",
+	"fp.btn.save":            " 저장 ",
+	"fp.btn.create":          " 생성 ",
+	"fp.btn.cancel":          " 취소 ",
+	"fp.places.header":       "위치",
+	"fp.places.home":         "~ 홈",
+	"fp.places.desktop":      "바탕화면",
+	"fp.places.documents":    "문서",
+	"fp.places.downloads":    "다운로드",
+	"fp.places.pictures":     "사진",
+	"fp.places.music":        "음악",
+	"fp.places.videos":       "비디오",
+	"fp.places.root":         "/ 루트",
+	"fp.places.trash":        "휴지통",
+	"fp.col.name":            "이름",
+	"fp.col.size":            "크기",
+	"fp.col.modified":        "수정일",
+	"fp.label.filter":        "필터: ",
+	"fp.label.name":          "이름: ",
+	"fp.label.new_dir":       "새 폴더: ",
+	"fp.empty.dir":           " (빈 디렉토리)",
+	"fp.empty.filter":        " (일치하는 파일이나 폴더가 없습니다)",
+	"fp.summary.full":        " %d개 항목 (폴더 %d, 파일 %d) · %s ",
+	"fp.summary.short":       " %d개 (폴더 %d, 파일 %d) ",
+	"fp.hint.default":        " Alt+Left/Right:뒤로/앞으로  Tab:영역전환  Ctrl+L:경로  Ctrl+N:새폴더  Ctrl+H:숨김  Esc:취소 ",
+	"fp.hint.nav":            "뒤로/앞으로",
+	"fp.hint.pane":           "영역전환",
+	"fp.hint.path_lbl":       "경로",
+	"fp.hint.new_dir_lbl":    "새폴더",
+	"fp.hint.hidden_lbl":     "숨김",
+	"fp.hint.cancel_lbl":     "취소",
+	"fp.hint.path":           " Enter:이동  Tab:자동완성  Esc:돌아가기 ",
+	"fp.hint.new_dir":        " Enter:폴더생성  Esc:취소 ",
+	"fp.err.open_dir":        "열기 실패: %v",
+	"fp.err.empty_name":      "파일 이름을 입력해 주세요.",
+	"fp.err.not_found":       "파일을 찾을 수 없습니다: %s",
+	"fp.err.no_parent":       "디렉토리가 존재하지 않습니다: %s",
+	"fp.err.path_not_found":  "경로를 찾을 수 없습니다: %s",
+	"fp.err.empty_dir_name":  "새 폴더 이름을 입력해 주세요.",
+	"fp.err.invalid_dir_name": "폴더 이름에 경로 구분자나 '.'/'..'을 쓸 수 없습니다.",
+	"fp.err.mkdir_failed":    "폴더 생성 실패: %v",
+	"fp.err.file_open":       "파일 열기 실패: %v",
 
 	// --- 오류 ---
 	"err.config_path":    "설정 경로를 찾을 수 없습니다",
