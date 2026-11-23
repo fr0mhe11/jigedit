@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/35291691/README.md)
 
 # JigEdit
 
@@ -18,21 +19,19 @@ heres a picture of jigedit editing it's own code
 ## Features
 
 - NotePad-like shortcuts 
-- extremely lightweight
+- extremely lightweight, zero external dependencies
 - enter current time by pressing F5 (just like NotePad!)
 - out-of-the-box experience : no need to spend eternity editing configs or learning new shortcuts
 - multi-tab management
 - command palette
-- **uses system file picker for managing files:** no more spening most of your time writing file PATHs 
-
+- **built-in TUI file picker:** mouse & keyboard controllable, shows all dotfiles by default, zero GUI dependencies — no more spending most of your time writing file PATHs
+- built-in clipboard & bracketed paste support (OSC 52, internal clipboard, and automatic integration with `wl-clipboard` / `xclip` if present)
 - intuitive terminal commands
 
 
 
 
 ## Installation
-
-also install `wl-clipboard` if you are on wayland for better clipboard features   
 
 ### Install jigedit on linux **(recommended)** :
 
@@ -58,31 +57,6 @@ rm -rf ~/.config/jigedit
 ```
 
 
-⚠️ Dependencies
-
-This program uses `zenity` (for file dialogs), and either `wl-clipboard` (for Wayland) or `xclip` (for X11) for clipboard support. Depending on your environment, these will be installed on your computer when installing jigedit.
-
-To remove those dependencies after uninstalling this program, run the following commands:
-
-⚠️ ⚠️ ⚠️ Warning! Remove these at your own risk! (Other programs on your system might be using them)
-
-**Ubuntu / Debian:**
-```bash
-sudo apt-get remove --autoremove zenity xclip wl-clipboard
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -Rns zenity xclip wl-clipboard
-```
-
-**Fedora / RHEL:**
-```bash
-sudo dnf remove zenity xclip wl-clipboard
-sudo dnf autoremove
-```
-
-
 
 
 ## TODO
@@ -94,4 +68,3 @@ sudo dnf autoremove
 - [ ] atomic file save
 
 (still deciding whether to implement the last 2 features)
-
