@@ -23,11 +23,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/atotto/clipboard"
 	"github.com/fsnotify/fsnotify"
 	"github.com/gdamore/tcell/v2"
 	"github.com/mattn/go-runewidth"
-	"github.com/ncruces/zenity"
 
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
@@ -41,12 +39,12 @@ import (
 
 // --- [ 1. 설정 및 도구 정의 ] ---
 type Config struct {
+	Language        string `json:"language"`
 	ShowLineNumbers bool   `json:"show_line_numbers"`
 	LineWrapping    bool   `json:"line_wrapping"`
 	TabSize         int    `json:"tab_size"`
 	DateFormat      string `json:"date_format"`
 	HighlightLine   bool   `json:"highlight_line"`
-	OverlapSearch   bool   `json:"overlap_search"`
 	AutoIndent      bool   `json:"auto_indent"`
 	ExpandTab       bool   `json:"expand_tab"`
 	SmartBackspace  bool   `json:"smart_backspace"`
@@ -58,12 +56,12 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
+		Language:        detectDefaultLanguage(),
 		ShowLineNumbers: true,
 		LineWrapping:    true,
 		TabSize:         4,
 		DateFormat:      "%Y-%m-%d %H:%M:%S",
 		HighlightLine:   true,
-		OverlapSearch:   false,
 		AutoIndent:      true,
 		ExpandTab:       true,
 		SmartBackspace:  false,
@@ -525,8 +523,9 @@ type Editor struct {
 	keyMenuH          int
 
 	// 💡 라이브 단축키 표. cfg 가 바뀔 때마다 applyConfig 가 다시 만든다.
-	bindings  map[KeyChord]*ActionDef
-	bindingOf map[string]KeyChord
+	bindings   map[KeyChord]*ActionDef
+	fpBindings map[KeyChord]*ActionDef
+	bindingOf  map[string]KeyChord
 
 	needsFullRefresh bool
 	mouseX           int
@@ -553,6 +552,31 @@ type Editor struct {
 	// keystroke while extra cursors merely exist.
 	prevExtraCursors    []Loc
 	prevExtraSelAnchors []Loc
+
+	// 💡 내장 TUI 파일 피커 & 확인 대화상자 상태
+	filePicker       *FilePicker
+	confirmDialog    *ConfirmDialog
+	lastPickerDir    string
+	prevFilePicker   bool
+	prevConfirm      bool
+	startupActions   []StartupAction
+	pickerWatchMu    sync.Mutex
+	watchedPickerDir string
+
+	// 💡 언어 선택 메뉴 상태
+	langMenuActive bool
+	langMenuItems  []PaletteItem
+	langMenuCursor int
+	langMenuX      int
+	langMenuY      int
+	langMenuW      int
+	langMenuH      int
+	prevLangMenu   bool
+
+	// 💡 Bracketed Paste (Ctrl+Shift+V / 마우스 붙여넣기) 누적 상태
+	inBracketedPaste bool
+	pasteBuf         strings.Builder
+	pasteLastCR      bool
 }
 
 // 💡 메뉴 아이템 이름의 첫 글자가 입력한 알파벳과 일치하는 인덱스를 탐색하는 헬퍼 함수
@@ -615,15 +639,34 @@ func NewEditor() *Editor {
 // 표시 문자열이 낡은 채로 남으므로, e.cfg 를 바꾸는 곳은 전부 이 함수를 쓴다.
 func (e *Editor) applyConfig(cfg Config) {
 	e.cfg = cfg
-	e.bindings, e.bindingOf = buildBindings(cfg)
+	setLanguage(cfg.Language)
+	e.bindings, e.fpBindings, e.bindingOf = buildBindings(cfg)
 	e.initPalette()
 	e.initContextMenu()
 	e.needsFullRefresh = true
 }
 
+func (e *Editor) bindingsForScope(scope string) map[KeyChord]*ActionDef {
+	if scope == actionScopeFilePicker {
+		return e.fpBindings
+	}
+	return e.bindings
+}
+
 // 💡 액션 ID 의 현재 단축키 표시 문자열. 바인딩이 없으면 빈 문자열.
 func (e *Editor) shortcutOf(id string) string {
 	return chordString(e.bindingOf[id])
+}
+
+func actionDisplayName(a *ActionDef) string {
+	if a == nil {
+		return ""
+	}
+	key := "action." + a.ID
+	if name := T(key); name != key {
+		return name
+	}
+	return a.Name
 }
 
 // 💡 액션 ID 로 팔레트/컨텍스트 메뉴 항목을 만든다. Shortcut 이 라이브 바인딩에서
@@ -633,7 +676,34 @@ func (e *Editor) actionItem(id string) PaletteItem {
 	if !ok {
 		return PaletteItem{Name: id}
 	}
-	return PaletteItem{Name: a.Name, Shortcut: e.shortcutOf(id), Action: a.Fn}
+	return PaletteItem{Name: actionDisplayName(a), Shortcut: e.shortcutOf(id), Action: a.Fn}
+}
+
+type pickerDirChangedEvent struct {
+	dir string
+}
+
+func (e *Editor) watchPickerDir(dir string) {
+	clean := ""
+	if dir != "" {
+		clean = filepath.Clean(dir)
+	}
+	e.pickerWatchMu.Lock()
+	defer e.pickerWatchMu.Unlock()
+	if e.watchedPickerDir == clean {
+		return
+	}
+	if e.watchedPickerDir != "" && e.fileWatcher != nil {
+		_ = e.fileWatcher.Remove(e.watchedPickerDir)
+	}
+	e.watchedPickerDir = clean
+	if clean != "" && e.fileWatcher != nil {
+		_ = e.fileWatcher.Add(clean)
+	}
+}
+
+func (e *Editor) unwatchPickerDir() {
+	e.watchPickerDir("")
 }
 
 func (e *Editor) listenFileChanges() {
@@ -652,6 +722,35 @@ func (e *Editor) listenFileChanges() {
 			if !ok {
 				return
 			}
+			// 파일 피커가 열어 둔 디렉토리의 생성/삭제/이름변경/수정 감지
+			e.pickerWatchMu.Lock()
+			wDir := e.watchedPickerDir
+			e.pickerWatchMu.Unlock()
+			if wDir != "" && event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename|fsnotify.Write|fsnotify.Chmod) != 0 {
+				evClean := filepath.Clean(event.Name)
+				if evClean == wDir || filepath.Clean(filepath.Dir(evClean)) == wDir {
+					key := "picker:" + wDir
+					targetDir := wDir
+					mu.Lock()
+					if t, exists := timers[key]; exists {
+						t.Reset(150 * time.Millisecond)
+					} else {
+						timers[key] = time.AfterFunc(150*time.Millisecond, func() {
+							if shuttingDown.Load() {
+								return
+							}
+							if globalScreenHandle != nil && *globalScreenHandle != nil {
+								(*globalScreenHandle).PostEvent(tcell.NewEventInterrupt(pickerDirChangedEvent{dir: targetDir}))
+							}
+							mu.Lock()
+							delete(timers, key)
+							mu.Unlock()
+						})
+					}
+					mu.Unlock()
+				}
+			}
+
 			if event.Op&fsnotify.Write == fsnotify.Write {
 				name := event.Name
 				mu.Lock()
@@ -701,16 +800,16 @@ func (e *Editor) initEncodingMenu() {} // 에러 방지용 빈 함수
 func (e *Editor) showEncodeActionMenu(x, y int) {
 	e.encodeMenuActive = true
 	e.encodeMenuState = 1
-	e.encodeMenuTitle = " Select Action "
+	e.encodeMenuTitle = T("menu.encode.action.title")
 	e.encodeMenuX, e.encodeMenuY = x, y
 	e.encodeMenuW, e.encodeMenuH = 0, 0
 	e.encodeMenuCursor = 0
 	e.encodeMenuItems = []PaletteItem{
-		{"저장될 인코딩 변경 (Set Save Encoding)...", "", func(e *Editor, s tcell.Screen) {
+		{T("menu.encode.set_save"), "", func(e *Editor, s tcell.Screen) {
 			e.encodeMenuAction = "save"
 			e.showEncodeRegionMenu()
 		}},
-		{"다시 열기 (Reopen With...)", "", func(e *Editor, s tcell.Screen) {
+		{T("menu.encode.reopen"), "", func(e *Editor, s tcell.Screen) {
 			e.encodeMenuAction = "reopen"
 			e.showEncodeRegionMenu()
 		}},
@@ -720,16 +819,16 @@ func (e *Editor) showEncodeActionMenu(x, y int) {
 func (e *Editor) showEncodeRegionMenu() {
 	e.encodeMenuActive = true
 	e.encodeMenuState = 2
-	e.encodeMenuTitle = " Select Region "
+	e.encodeMenuTitle = T("menu.encode.region.title")
 	e.encodeMenuW, e.encodeMenuH = 0, 0
 	e.encodeMenuCursor = 0
 	e.encodeMenuItems = []PaletteItem{
-		{"< 뒤로 가기 (Back)", "", func(e *Editor, s tcell.Screen) { e.showEncodeActionMenu(e.encodeMenuX, e.encodeMenuY) }},
+		{T("menu.encode.back"), "", func(e *Editor, s tcell.Screen) { e.showEncodeActionMenu(e.encodeMenuX, e.encodeMenuY) }},
 	}
 	for i, group := range encodingGroups {
 		idx := i
 		e.encodeMenuItems = append(e.encodeMenuItems, PaletteItem{
-			Name:   group.Region + " >",
+			Name:   T("region."+group.Region) + " >",
 			Action: func(e *Editor, s tcell.Screen) { e.encodeRegionIdx = idx; e.showEncodeEncodingMenu() },
 		})
 	}
@@ -739,11 +838,11 @@ func (e *Editor) showEncodeEncodingMenu() {
 	e.encodeMenuActive = true
 	e.encodeMenuState = 3
 	group := encodingGroups[e.encodeRegionIdx]
-	e.encodeMenuTitle = " " + group.Region + " "
+	e.encodeMenuTitle = " " + T("region."+group.Region) + " "
 	e.encodeMenuW, e.encodeMenuH = 0, 0
 	e.encodeMenuCursor = 0
 	e.encodeMenuItems = []PaletteItem{
-		{"< 뒤로 가기 (Back)", "", func(e *Editor, s tcell.Screen) { e.showEncodeRegionMenu() }},
+		{T("menu.encode.back"), "", func(e *Editor, s tcell.Screen) { e.showEncodeRegionMenu() }},
 	}
 	for _, enc := range group.Encodings {
 		encName := enc
@@ -795,14 +894,16 @@ func (e *Editor) initPalette() {
 
 		e.actionItem("toggle_config"),
 
-		{"단축키 설정 (Keybindings)", "", func(e *Editor, s tcell.Screen) { e.showKeybindMenu() }},
+		{T("menu.keybindings"), "", func(e *Editor, s tcell.Screen) { e.showKeybindMenu() }},
 
-		{"설정 초기화 (Reset Config)", "", func(e *Editor, s tcell.Screen) {
+		{T("menu.set_language"), T("lang.name." + string(currentLang)), func(e *Editor, s tcell.Screen) { e.showLanguageMenu() }},
+
+		{T("menu.reset_config"), "", func(e *Editor, s tcell.Screen) {
 			e.promptMode = true
 			e.promptType = "reset_config"
 		}},
 
-		{"읽기 전용 모드 전환 (Toggle ReadOnly)", "", func(e *Editor, s tcell.Screen) {
+		{T("menu.toggle_readonly"), "", func(e *Editor, s tcell.Screen) {
 			b := e.getActive()
 			b.isReadOnly = !b.isReadOnly // 상태 반전
 			e.needsFullRefresh = true    // 화면 UI(자물쇠 아이콘 등) 즉시 갱신
@@ -812,6 +913,36 @@ func (e *Editor) initPalette() {
 	}
 }
 
+func (e *Editor) showLanguageMenu() {
+	e.langMenuActive = true
+	e.langMenuW, e.langMenuH = 0, 0
+	e.langMenuCursor = 0
+	e.menuScrollOffset = 0
+	e.langMenuItems = make([]PaletteItem, 0, len(availableLangs))
+	for i, lang := range availableLangs {
+		l := lang
+		mark := ""
+		if l == currentLang {
+			mark = "✓"
+			e.langMenuCursor = i
+		}
+		e.langMenuItems = append(e.langMenuItems, PaletteItem{
+			Name:     T("lang.name." + string(l)),
+			Shortcut: mark,
+			Action: func(e *Editor, s tcell.Screen) {
+				cfg := e.cfg
+				cfg.Language = string(l)
+				e.applyConfig(cfg)
+				if err := SaveConfig(e.cfg); err != nil {
+					e.showKeybindAlert(Tf("err.config_save", err))
+				}
+				e.syncConfigBuffers()
+			},
+		})
+	}
+	e.needsFullRefresh = true
+}
+
 // 💡 단축키 설정 메뉴 (state 1: 전체 목록).
 // 인코딩 메뉴와 같은 규칙: W/H 를 0 으로 리셋해 drawMenu 가 위치를 다시 계산하게 한다.
 // menuScrollOffset 은 세 메뉴가 공유하는 필드라 반드시 같이 리셋해야 한다.
@@ -819,13 +950,13 @@ func (e *Editor) showKeybindMenu() {
 	e.keyMenuActive = true
 	e.keyMenuState = 1
 	e.keyMenuTargetID = ""
-	e.keyMenuTitle = " 단축키 설정 (Keybindings) "
+	e.keyMenuTitle = T("menu.keybind.title")
 	e.keyMenuW, e.keyMenuH = 0, 0
 	e.keyMenuCursor = 0
 	e.menuScrollOffset = 0
 
 	e.keyMenuItems = []PaletteItem{
-		{"모든 단축키 기본값으로 되돌리기 (Reset All)", "", func(e *Editor, s tcell.Screen) {
+		{T("menu.keybind.reset_all"), "", func(e *Editor, s tcell.Screen) {
 			e.promptMode = true
 			e.promptType = "reset_keybinds"
 		}},
@@ -834,11 +965,11 @@ func (e *Editor) showKeybindMenu() {
 		a := &Actions[i]
 		label := chordString(e.bindingOf[a.ID])
 		if label == "" {
-			label = "(없음)"
+			label = T("menu.keybind.unbound")
 		}
 		id := a.ID
 		e.keyMenuItems = append(e.keyMenuItems, PaletteItem{
-			Name:     a.Name,
+			Name:     actionDisplayName(a),
 			Shortcut: label,
 			Action:   func(e *Editor, s tcell.Screen) { e.showKeybindCapture(id) },
 		})
@@ -863,13 +994,13 @@ func (e *Editor) showKeybindCapture(id string) {
 	e.keyMenuState = 2
 	e.keyMenuTargetID = id
 	e.keyMenuListCursor = e.keyMenuCursor
-	e.keyMenuTitle = " " + a.Name + " "
+	e.keyMenuTitle = " " + actionDisplayName(a) + " "
 	e.keyMenuW, e.keyMenuH = 0, 0
 	e.keyMenuCursor = -1
 	e.menuScrollOffset = 0
 	e.keyMenuItems = []PaletteItem{
-		{Name: "새 단축키를 누르세요", Shortcut: chordString(e.bindingOf[id])},
-		{Name: "Esc:취소  Delete:기본값  Backspace:해제"},
+		{Name: T("menu.keybind.press"), Shortcut: chordString(e.bindingOf[id])},
+		{Name: T("menu.keybind.hint")},
 	}
 	e.needsFullRefresh = true
 }
@@ -929,16 +1060,16 @@ func (e *Editor) commitKeybind(id string, chord KeyChord) {
 
 	if chord.isZero() {
 		if id == actionIDPalette {
-			e.showKeybindAlert("커맨드 팔레트는 해제할 수 없습니다 (되돌릴 방법이 사라집니다)")
+			e.showKeybindAlert(T("keybind.err.palette_locked"))
 			return
 		}
 	} else {
 		if reservedChord(chord) {
-			e.showKeybindAlert(chordString(chord) + " 는 편집기 예약 키라 사용할 수 없습니다")
+			e.showKeybindAlert(Tf("keybind.err.reserved", chordString(chord)))
 			return
 		}
-		if other, dup := e.bindings[chord]; dup && other.ID != id {
-			e.showKeybindAlert(chordString(chord) + " 는 이미 '" + other.Name + "' 에 할당되어 있습니다")
+		if other, dup := e.bindingsForScope(a.Scope)[chord]; dup && other.ID != id {
+			e.showKeybindAlert(Tf("keybind.err.duplicate", chordString(chord), actionDisplayName(other)))
 			return
 		}
 	}
@@ -953,7 +1084,7 @@ func (e *Editor) commitKeybind(id string, chord KeyChord) {
 
 	e.applyConfig(cfg)
 	if err := SaveConfig(e.cfg); err != nil {
-		e.showKeybindAlert("설정 저장 실패: " + err.Error())
+		e.showKeybindAlert(Tf("err.config_save", err))
 	}
 	e.syncConfigBuffers()
 	e.backToKeybindList()
@@ -3365,7 +3496,7 @@ func (e *Editor) getTabTitle(bufIdx int) string {
 		if b.isConfig {
 			return "config.json"
 		}
-		return "Untitled"
+		return T("status.tab.untitled")
 	}
 
 	fileName := filepath.Base(b.filePath)
@@ -3412,6 +3543,9 @@ func (e *Editor) draw(s tcell.Screen) {
 		e.ctxMenuActive || e.prevCtxMenu ||
 		e.encodeMenuActive || e.prevEncode ||
 		e.keyMenuActive || e.prevKeyMenu ||
+		e.langMenuActive || e.prevLangMenu ||
+		e.filePicker != nil || e.prevFilePicker ||
+		e.confirmDialog != nil || e.prevConfirm ||
 		e.promptMode || e.prevPrompt ||
 		b.searchMode || e.prevSearch ||
 		b.gotoMode || e.prevGoto || len(b.lines) != e.prevLinesLen ||
@@ -3805,25 +3939,25 @@ func (e *Editor) draw(s tcell.Screen) {
 	if e.promptMode {
 		var promptMsg string
 		if e.promptType == "quit" {
-			promptMsg = " [Warning] 저장되지 않은 탭이 있습니다. 무시하고 종료할까요? [Y/n]"
+			promptMsg = T("prompt.quit")
 		} else if e.promptType == "close" {
-			promptMsg = " [Warning] 변경된 내용이 있습니다. 탭을 닫을까요? [Y/n]"
+			promptMsg = T("prompt.close")
 		} else if e.promptType == "reset_config" {
-			promptMsg = " [Warning] 설정을 기본값으로 초기화하시겠습니까? [Y/n]"
+			promptMsg = T("prompt.reset_config")
 		} else if e.promptType == "reset_keybinds" {
-			promptMsg = " [Warning] 모든 단축키를 기본값으로 되돌리시겠습니까? [Y/n]"
+			promptMsg = T("prompt.reset_keybinds")
 		} else if e.promptType == "reopen" {
-			promptMsg = " [Warning] 변경된 내용이 있습니다. 무시하고 다시 열까요? [Y/n]"
+			promptMsg = T("prompt.reopen")
 		} else if e.promptType == "close_config" {
-			promptMsg = " [Warning] 설정이 저장되지 않았습니다. 무시하고 닫을까요? [Y/n]"
+			promptMsg = T("prompt.close_config")
 		} else if e.promptType == "external_change" {
 			fileName := ""
 			if e.targetCloseBuffer >= 0 && e.targetCloseBuffer < len(e.buffers) {
 				fileName = filepath.Base(e.buffers[e.targetCloseBuffer].filePath)
 			}
-			promptMsg = fmt.Sprintf(" [Warning] '%s' 파일이 외부에서 변경되었습니다. 디스크 내용으로 덮어쓸까요? [Y/n]", fileName)
+			promptMsg = Tf("prompt.external_change", fileName)
 		} else if e.promptType == "alert" {
-			promptMsg = " [Alert] " + e.alertMessage + " (Enter/Esc)"
+			promptMsg = Tf("prompt.alert", e.alertMessage)
 		}
 
 		promptStyle := tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite).Bold(true)
@@ -3879,15 +4013,15 @@ func (e *Editor) draw(s tcell.Screen) {
 		var targetStr *[]rune
 
 		if b.gotoMode {
-			prefix = " [Go To] Line,Col: "
+			prefix = T("search.goto.prefix")
 			targetStr = &b.gotoInput
-			suffix = "  (Enter: 이동, Esc: 취소)"
+			suffix = T("search.goto.hint")
 		} else if b.isReplace {
 			if b.replaceStep == 1 {
-				prefix = " [Replace] Find: "
+				prefix = T("search.replace.find")
 				targetStr = &b.searchQuery
 			} else if b.replaceStep == 2 {
-				prefix = " [Replace] Find: " + string(b.searchQuery) + "  ➔ Replace: "
+				prefix = T("search.replace.find") + string(b.searchQuery) + T("search.replace.to")
 				targetStr = &b.replaceQuery
 			} else {
 				matchCountStr := "0/0"
@@ -3898,7 +4032,7 @@ func (e *Editor) draw(s tcell.Screen) {
 					}
 					matchCountStr = sprintfRight(b.matchIdx+1, 0) + "/" + totStr
 				}
-				prefix = " [Replace] Find: " + string(b.searchQuery) + "  ➔ Replace: " + string(b.replaceQuery) + "  [" + matchCountStr + "] (Enter:바꾸기, Up:이전, Down:건너뛰기, Ctrl+A:모두)"
+				prefix = T("search.replace.find") + string(b.searchQuery) + T("search.replace.to") + string(b.replaceQuery) + "  [" + matchCountStr + T("search.replace.hint")
 				targetStr = nil
 			}
 		} else {
@@ -3910,9 +4044,9 @@ func (e *Editor) draw(s tcell.Screen) {
 				}
 				matchCountStr = sprintfRight(b.matchIdx+1, 0) + "/" + totStr
 			}
-			prefix = " [Find] Search: "
+			prefix = T("search.find.prefix")
 			targetStr = &b.searchQuery
-			suffix = "  [" + matchCountStr + "] (Enter/Down:다음, Up:이전)"
+			suffix = "  [" + matchCountStr + T("search.find.hint")
 		}
 
 		currentX := 0
@@ -4041,7 +4175,7 @@ func (e *Editor) draw(s tcell.Screen) {
 	} else {
 		modeName := b.encoding
 		if b.isConfig {
-			modeName = "CONFIG.JSON"
+			modeName = T("status.config")
 		}
 		charCountStr := ""
 		if hasSel {
@@ -4056,26 +4190,26 @@ func (e *Editor) draw(s tcell.Screen) {
 				selChars += utf8.RuneCount(b.lines[selEnd.L][:selEnd.C])
 				selChars += selEnd.L - selStart.L
 			}
-			charCountStr = fmt.Sprintf("%d Sel", selChars)
+			charCountStr = Tf("status.sel", selChars)
 		} else {
-			charCountStr = fmt.Sprintf("%d Chars", b.totalChars)
+			charCountStr = Tf("status.chars", b.totalChars)
 		}
 
 		// 💡 리바인딩을 따라가도록 라이브 바인딩에서 생성한다.
-		prefix := " Command Palette | "
+		prefix := " " + T("status.palette") + " | "
 		if sc := e.shortcutOf(actionIDPalette); sc != "" {
-			prefix = " [" + sc + "] Command Palette | "
+			prefix = " [" + sc + "] " + T("status.palette") + " | "
 		}
-		encodeStr := "Encode:" + modeName
+		encodeStr := T("status.encode") + modeName
 
 		roStr := ""
 		if b.isReadOnly {
-			roStr = " | 🔒 READONLY"
+			roStr = T("status.readonly")
 		}
 
 		displayPath := b.filePath
 		if displayPath == "" {
-			displayPath = "New Buffer"
+			displayPath = T("status.new_buffer")
 		} else {
 			pathRunes := []rune(displayPath)
 			if len(pathRunes) > 50 {
@@ -4091,7 +4225,7 @@ func (e *Editor) draw(s tcell.Screen) {
 			}
 			runeCol = utf8.RuneCount(b.lines[b.cursor.L][:safeC]) + 1
 		}
-		suffix := fmt.Sprintf(" | %s | Ln %d, Col %d | %s%s ", charCountStr, b.cursor.L+1, runeCol, displayPath, roStr)
+		suffix := Tf("status.position", charCountStr, b.cursor.L+1, runeCol, displayPath, roStr)
 
 		currentX := 0
 		for _, r := range prefix {
@@ -4313,10 +4447,13 @@ func (e *Editor) draw(s tcell.Screen) {
 		}
 	}
 
-	drawMenu(e.paletteActive, " Command Palette ", e.paletteItems, e.paletteCursor, 0, 0, true, &e.paletteX, &e.paletteY, &e.paletteW, &e.paletteH)
+	drawMenu(e.paletteActive, T("menu.palette.title"), e.paletteItems, e.paletteCursor, 0, 0, true, &e.paletteX, &e.paletteY, &e.paletteW, &e.paletteH)
 	drawMenu(e.ctxMenuActive, "", e.ctxMenuItems, e.ctxMenuCursor, e.ctxMenuX, e.ctxMenuY, false, &e.ctxMenuX, &e.ctxMenuY, &e.ctxMenuW, &e.ctxMenuH)
 	drawMenu(e.encodeMenuActive, e.encodeMenuTitle, e.encodeMenuItems, e.encodeMenuCursor, e.encodeMenuX, e.encodeMenuY, false, &e.encodeMenuX, &e.encodeMenuY, &e.encodeMenuW, &e.encodeMenuH)
 	drawMenu(e.keyMenuActive, e.keyMenuTitle, e.keyMenuItems, e.keyMenuCursor, e.keyMenuX, e.keyMenuY, true, &e.keyMenuX, &e.keyMenuY, &e.keyMenuW, &e.keyMenuH)
+	drawMenu(e.langMenuActive, T("menu.language.title"), e.langMenuItems, e.langMenuCursor, 0, 0, true, &e.langMenuX, &e.langMenuY, &e.langMenuW, &e.langMenuH)
+	e.drawFilePicker(s, w, h)
+	e.drawConfirmDialog(s, w, h)
 
 	e.prevActiveBuf = e.activeBuffer
 	e.prevVOffset = b.vOffsetL
@@ -4326,6 +4463,9 @@ func (e *Editor) draw(s tcell.Screen) {
 	e.prevCtxMenu = e.ctxMenuActive
 	e.prevEncode = e.encodeMenuActive
 	e.prevKeyMenu = e.keyMenuActive
+	e.prevLangMenu = e.langMenuActive
+	e.prevFilePicker = e.filePicker != nil
+	e.prevConfirm = e.confirmDialog != nil
 	e.prevPrompt = e.promptMode
 	e.prevSearch = b.searchMode
 	e.prevGoto = b.gotoMode
@@ -4344,7 +4484,15 @@ func (e *Editor) draw(s tcell.Screen) {
 
 	b.dirtyStartL = -1
 
-	if cursorVX >= lineNumWidth && cursorVX < w && cursorVY >= 0 && cursorVY < h {
+	if e.confirmDialog != nil {
+		s.HideCursor()
+	} else if e.filePicker != nil {
+		if e.filePicker.cursorX >= 0 && e.filePicker.cursorX < w && e.filePicker.cursorY >= 0 && e.filePicker.cursorY < h {
+			s.ShowCursor(e.filePicker.cursorX, e.filePicker.cursorY)
+		} else {
+			s.HideCursor()
+		}
+	} else if cursorVX >= lineNumWidth && cursorVX < w && cursorVY >= 0 && cursorVY < h {
 		s.ShowCursor(cursorVX, cursorVY)
 	} else {
 		s.HideCursor()
@@ -4355,39 +4503,13 @@ func (e *Editor) draw(s tcell.Screen) {
 var globalScreenHandle *tcell.Screen
 var shuttingDown atomic.Bool
 
-func (e *Editor) openFile(s tcell.Screen) {
-	s.Suspend()
-	filePath, err := zenity.SelectFile(zenity.Title("파일 열기"))
-	s.Resume()
-
-	// 💡 FIX: GUI 창이 닫힌 직후 터미널 화면 강제 전체 리프레시!
-	s.Sync()
-	e.needsFullRefresh = true
-
-	if err != nil || filePath == "" {
-		return
-	}
-
-	// 💡 failsafe: 대용량 파일 경고
-	fileInfo, errStat := os.Stat(filePath)
-	if errStat == nil && fileInfo.Size() > 50*1024*1024 {
-		s.Suspend()
-		errConfirm := zenity.Question(
-			fmt.Sprintf("파일 크기가 매우 큽니다 (%.1f MB).\n열면 속도가 느려지거나 멈출 수 있습니다. 계속 진행하시겠습니까?", float64(fileInfo.Size())/(1024*1024)),
-			zenity.Title("대용량 파일 경고"),
-			zenity.OKLabel("예"),
-			zenity.CancelLabel("아니오"),
-		)
-		s.Resume()
-		s.Sync()
-		e.needsFullRefresh = true
-		if errConfirm != nil {
-			return
-		}
-	}
-
+func (e *Editor) loadFileIntoNewTab(filePath string) {
 	lines, encoding, totalChars, hash, endsWithNewline, err := loadFileLines(filePath, "")
 	if err != nil {
+		e.promptMode = true
+		e.promptType = "alert"
+		e.alertMessage = Tf("fp.err.file_open", err)
+		e.needsFullRefresh = true
 		return
 	}
 
@@ -4410,6 +4532,30 @@ func (e *Editor) openFile(s tcell.Screen) {
 	b.updateSavedFileInfo()
 	e.buffers = append(e.buffers, b)
 	e.activeBuffer = len(e.buffers) - 1
+	e.needsFullRefresh = true
+}
+
+func (e *Editor) openFile(s tcell.Screen) {
+	e.openFilePickerModal(fpModeOpen, "", "", false, func(filePath string) {
+		if filePath == "" {
+			return
+		}
+		// 💡 failsafe: 대용량 파일 경고 (순수 TUI 확인 대화상자)
+		fileInfo, errStat := os.Stat(filePath)
+		if errStat == nil && fileInfo.Size() > 50*1024*1024 {
+			e.openConfirmDialog(
+				" "+T("dialog.bigfile.title")+" ",
+				Tf("dialog.bigfile.body", float64(fileInfo.Size())/(1024*1024)),
+				T("dialog.bigfile.ok"),
+				T("dialog.bigfile.cancel"),
+				false,
+				func() { e.loadFileIntoNewTab(filePath) },
+				nil,
+			)
+			return
+		}
+		e.loadFileIntoNewTab(filePath)
+	}, nil)
 }
 
 func (e *Editor) saveActiveFile(s tcell.Screen) {
@@ -4423,7 +4569,7 @@ func (e *Editor) saveActiveFile(s tcell.Screen) {
 	if err != nil {
 		e.promptMode = true
 		e.promptType = "alert"
-		e.alertMessage = fmt.Sprintf("저장 실패: %v", err)
+		e.alertMessage = Tf("err.save_failed", err)
 		return // 💡 실패하면 저장되었다고 마킹하지 않고 빠져나감
 	}
 
@@ -4440,44 +4586,44 @@ func (e *Editor) saveActiveFile(s tcell.Screen) {
 
 func (e *Editor) saveAsFile(s tcell.Screen) {
 	b := e.getActive()
-	s.Suspend()
-	filePath, err := zenity.SelectFileSave(zenity.Title("다른 이름으로 저장"), zenity.ConfirmOverwrite())
-	s.Resume()
-
-	s.Sync()
-	e.needsFullRefresh = true
-
-	if err != nil || filePath == "" {
-		return
+	defaultName := ""
+	if b.filePath != "" {
+		defaultName = filepath.Base(b.filePath)
 	}
-
-	err = b.saveToFile(filePath)
-	if err != nil {
-		e.promptMode = true
-		e.promptType = "alert"
-		e.alertMessage = fmt.Sprintf("저장 실패: %v", err)
-		return
-	}
-
-	// 💡 저장이 디스크에 무사히 완료된 후에만 내부 상태를 갱신합니다.
-	oldPath := b.filePath
-	b.filePath = filePath
-
-	b.markSaved()
-
-	// 💡 이름이 바뀌었다면 이전 파일의 감시를 해제하고 새 파일을 감시
-	if oldPath != "" && oldPath != filePath {
-		e.fileWatcher.Remove(oldPath)
-	}
-	e.fileWatcher.Add(filePath)
-
-	if b.isConfig {
-		content := b.getContent()
-		var newCfg Config
-		if err := json.Unmarshal([]byte(content), &newCfg); err == nil {
-			e.applyConfig(newCfg)
+	e.openFilePickerModal(fpModeSaveAs, "", defaultName, false, func(filePath string) {
+		if filePath == "" {
+			return
 		}
-	}
+		err := b.saveToFile(filePath)
+		if err != nil {
+			e.promptMode = true
+			e.promptType = "alert"
+			e.alertMessage = Tf("err.save_failed", err)
+			e.needsFullRefresh = true
+			return
+		}
+
+		// 💡 저장이 디스크에 무사히 완료된 후에만 내부 상태를 갱신합니다.
+		oldPath := b.filePath
+		b.filePath = filePath
+
+		b.markSaved()
+
+		// 💡 이름이 바뀌었다면 이전 파일의 감시를 해제하고 새 파일을 감시
+		if oldPath != "" && oldPath != filePath {
+			e.fileWatcher.Remove(oldPath)
+		}
+		e.fileWatcher.Add(filePath)
+
+		if b.isConfig {
+			content := b.getContent()
+			var newCfg Config
+			if err := json.Unmarshal([]byte(content), &newCfg); err == nil {
+				e.applyConfig(newCfg)
+			}
+		}
+		e.needsFullRefresh = true
+	}, nil)
 }
 
 func (e *Editor) toggleConfigBuffer() {
@@ -4619,7 +4765,7 @@ func (b *Buffer) getSearchRegex() *regexp.Regexp {
 }
 
 // 💡 O(N) 전체 탐색을 버리고 커서 기준 위/아래 양방향(O(K))으로 뻗어나가는 극한 최적화 검색 엔진
-func (b *Buffer) findAllMatches(overlap bool) {
+func (b *Buffer) findAllMatches() {
 	b.matches = []MatchInfo{}
 	b.matchIdx = -1
 	b.searchCapped = false
@@ -4686,12 +4832,7 @@ func (b *Buffer) findAllMatches(overlap bool) {
 				if match {
 					matchLen := currentByteOffset - offset
 					lineMatches = append(lineMatches, MatchInfo{loc: Loc{L: lineIdx, C: offset, TargetX: -1}, matchLen: matchLen})
-					if !overlap {
-						offset = currentByteOffset
-					} else {
-						_, size := utf8.DecodeRune(lineData[offset:])
-						offset += size
-					}
+					offset = currentByteOffset
 				} else {
 					if offset >= len(lineData) {
 						break
@@ -4775,7 +4916,7 @@ func (b *Buffer) jumpToMatch() {
 	b.selection.End = Loc{L: m.loc.L, C: m.loc.C + m.matchLen, TargetX: -1}
 }
 
-func (b *Buffer) replaceCurrent(overlap bool) {
+func (b *Buffer) replaceCurrent() {
 	if b.matchIdx < 0 || b.matchIdx >= len(b.matches) {
 		return
 	}
@@ -4801,7 +4942,7 @@ func (b *Buffer) replaceCurrent(overlap bool) {
 
 	targetLoc := b.cursor
 	b.clearSelection()
-	b.findAllMatches(overlap)
+	b.findAllMatches()
 
 	if len(b.matches) > 0 {
 		b.matchIdx = b.findInitialMatchIdx(targetLoc, false)
@@ -5011,13 +5152,19 @@ func reservedChord(c KeyChord) bool {
 	return false
 }
 
+const (
+	actionScopeEditor     = ""
+	actionScopeFilePicker = "filepicker"
+)
+
 // ActionDef 는 리바인딩 가능한 액션 하나. ID 는 config.json 에 그대로 쓰이므로
 // 한 번 정하면 바꾸지 않는다.
 type ActionDef struct {
-	ID   string
-	Name string
-	Def  KeyChord // 기본 바인딩
-	Fn   EditorAction
+	ID    string
+	Name  string
+	Scope string   // "" (에디터) 또는 "filepicker" (파일 피커)
+	Def   KeyChord // 기본 바인딩
+	Fn    EditorAction
 
 	NoSnap   bool // 실행 후 snapToCursor = false (화면 점프 방지)
 	Mutates  bool // isReadOnly 버퍼에서 차단
@@ -5104,7 +5251,7 @@ func init() {
 				// cursor's own), not just the primary's -- see getMultiSelectedText.
 				text := e.getActive().getMultiSelectedText()
 				if text != "" {
-					_ = clipboard.WriteAll(text)
+					globalClipboard.Write(s, text)
 				}
 			}},
 
@@ -5116,7 +5263,7 @@ func init() {
 				}
 				text := b.getMultiSelectedText()
 				if text != "" {
-					_ = clipboard.WriteAll(text)
+					globalClipboard.Write(s, text)
 					b.BeginTransaction()
 					b.DeleteSelection()
 					b.EndTransaction()
@@ -5125,32 +5272,7 @@ func init() {
 
 		{ID: "paste", Name: "붙여넣기 (Paste)", Def: ctrlChord(tcell.KeyCtrlV),
 			Fn: func(e *Editor, s tcell.Screen) {
-				b := e.getActive()
-				if b.isReadOnly {
-					return
-				}
-				text, err := clipboard.ReadAll()
-				if err == nil && text != "" {
-					text = strings.ReplaceAll(text, "\r\n", "\n")
-					b.BeginTransaction()
-					b.DeleteSelection()
-					// ponytail(CM6): if the clipboard splits into exactly one line per
-					// live caret, give each caret its own line (in document order)
-					// instead of pasting the whole blob at every caret -- mirrors
-					// CodeMirror 6's "byLine" paste, the round-trip counterpart of
-					// copying from N selections (getMultiSelectedText). Any other line
-					// count falls back to the old "same text everywhere" paste, which
-					// is also CM6's own fallback for a non-matching line count.
-					cursorCount := 1 + len(b.extraCursors)
-					parts := strings.Split(text, "\n")
-					if cursorCount > 1 && len(parts) == cursorCount {
-						rank := b.cursorRankMap()
-						b.runMultiCursorInsert(func(loc Loc, _ bool) string { return parts[rank[loc]] })
-					} else {
-						b.runMultiCursorInsert(func(Loc, bool) string { return text })
-					}
-					b.EndTransaction()
-				}
+				e.pasteIntoBuffer(globalClipboard.ReadSync())
 			}},
 
 		{ID: "find", Name: "찾기 (Find)", Def: ctrlChord(tcell.KeyCtrlF), NoSnap: true,
@@ -5226,6 +5348,7 @@ func init() {
 				e.menuScrollOffset = 0
 				e.ctxMenuActive = false
 				e.encodeMenuActive = false
+				e.langMenuActive = false
 				e.closeKeybindMenu()
 			}},
 
@@ -5245,6 +5368,34 @@ func init() {
 				s.Fini()
 				os.Exit(0)
 			}},
+
+		// --- 파일 피커 전용 단축키 (별도 스코프: 에디터 단축키와 독립) ---
+		{ID: "fp_back", Name: "[파일 피커] 뒤로 가기 (File Picker: Back)", Scope: actionScopeFilePicker, Def: altChord(tcell.KeyLeft),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionBack() }},
+
+		{ID: "fp_forward", Name: "[파일 피커] 앞으로 가기 (File Picker: Forward)", Scope: actionScopeFilePicker, Def: altChord(tcell.KeyRight),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionForward() }},
+
+		{ID: "fp_parent", Name: "[파일 피커] 상위 폴더 (File Picker: Parent Directory)", Scope: actionScopeFilePicker, Def: altChord(tcell.KeyUp),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionParent() }},
+
+		{ID: "fp_home", Name: "[파일 피커] 홈 폴더 (File Picker: Home Directory)", Scope: actionScopeFilePicker, Def: altChord(tcell.KeyHome),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionHome() }},
+
+		{ID: "fp_refresh", Name: "[파일 피커] 새로고침 (File Picker: Refresh)", Scope: actionScopeFilePicker, Def: plainChord(tcell.KeyF5),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionRefresh() }},
+
+		{ID: "fp_toggle_hidden", Name: "[파일 피커] 숨김 파일 표시 (File Picker: Toggle Hidden Files)", Scope: actionScopeFilePicker, Def: ctrlChord(tcell.KeyCtrlH),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionToggleHidden() }},
+
+		{ID: "fp_edit_path", Name: "[파일 피커] 경로 편집 (File Picker: Edit Path)", Scope: actionScopeFilePicker, Def: ctrlChord(tcell.KeyCtrlL),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionEditPath() }},
+
+		{ID: "fp_filter", Name: "[파일 피커] 필터 (File Picker: Filter)", Scope: actionScopeFilePicker, Def: ctrlChord(tcell.KeyCtrlF),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionFilter() }},
+
+		{ID: "fp_new_dir", Name: "[파일 피커] 새 폴더 (File Picker: New Folder)", Scope: actionScopeFilePicker, Def: ctrlChord(tcell.KeyCtrlN),
+			Fn: func(e *Editor, s tcell.Screen) { e.fpActionNewDir() }},
 	}
 
 	actionByID = make(map[string]*ActionDef, len(Actions))
@@ -5260,15 +5411,24 @@ func init() {
 // 배치는 반드시 "먼저 전부 비우고, 그 다음 전부 놓기" 두 단계여야 한다.
 // 한 번에 하나씩 처리하면 두 액션이 서로의 키를 맞바꾼 설정(A=B의 기본값,
 // B=A의 기본값)이 양쪽 다 충돌로 거부되어 통째로 기본값으로 되돌아간다.
-func buildBindings(cfg Config) (map[KeyChord]*ActionDef, map[string]KeyChord) {
+// 충돌 검사는 액션의 Scope(에디터 vs 파일 피커)별로 독립 수행된다.
+func buildBindings(cfg Config) (map[KeyChord]*ActionDef, map[KeyChord]*ActionDef, map[string]KeyChord) {
 	byID := make(map[string]KeyChord, len(Actions))
-	occupied := make(map[KeyChord]string, len(Actions))
+	occupied := make(map[string]map[KeyChord]string)
+	scopeOcc := func(scope string) map[KeyChord]string {
+		m, ok := occupied[scope]
+		if !ok {
+			m = make(map[KeyChord]string)
+			occupied[scope] = m
+		}
+		return m
+	}
 	for i := range Actions {
 		a := &Actions[i]
 		c := normalizeChord(a.Def)
 		byID[a.ID] = c
 		if !c.isZero() {
-			occupied[c] = a.ID
+			scopeOcc(a.Scope)[c] = a.ID
 		}
 	}
 
@@ -5281,11 +5441,13 @@ func buildBindings(cfg Config) (map[KeyChord]*ActionDef, map[string]KeyChord) {
 
 	type pendingBind struct {
 		id    string
+		scope string
 		chord KeyChord
 	}
 	pending := make([]pendingBind, 0, len(ids))
 	for _, id := range ids {
-		if _, known := actionByID[id]; !known {
+		a, known := actionByID[id]
+		if !known {
 			continue
 		}
 		chord, ok := parseChord(cfg.Keybindings[id])
@@ -5299,24 +5461,25 @@ func buildBindings(cfg Config) (map[KeyChord]*ActionDef, map[string]KeyChord) {
 		} else if reservedChord(chord) {
 			continue
 		}
-		pending = append(pending, pendingBind{id, chord})
+		pending = append(pending, pendingBind{id, a.Scope, chord})
 	}
 
 	// 1단계: 오버라이드 대상 액션들의 현재 점유를 모두 비운다 (자리 맞바꾸기 허용).
 	for _, p := range pending {
-		delete(occupied, byID[p.id])
+		delete(scopeOcc(p.scope), byID[p.id])
 		byID[p.id] = KeyChord{}
 	}
-	// 2단계: 배치. 남이 이미 쓰는 chord 면 무시한다.
+	// 2단계: 배치. 같은 스코프에서 남이 이미 쓰는 chord 면 무시한다.
 	for _, p := range pending {
 		if p.chord.isZero() {
 			continue
 		}
-		if holder, dup := occupied[p.chord]; dup && holder != p.id {
+		occ := scopeOcc(p.scope)
+		if holder, dup := occ[p.chord]; dup && holder != p.id {
 			continue
 		}
 		byID[p.id] = p.chord
-		occupied[p.chord] = p.id
+		occ[p.chord] = p.id
 	}
 	// 3단계: 2단계에서 거부당한 액션은 기본값이 아직 비어 있으면 되돌려 준다.
 	for _, p := range pending {
@@ -5324,21 +5487,28 @@ func buildBindings(cfg Config) (map[KeyChord]*ActionDef, map[string]KeyChord) {
 			continue
 		}
 		def := normalizeChord(actionByID[p.id].Def)
-		if _, dup := occupied[def]; dup {
+		occ := scopeOcc(p.scope)
+		if _, dup := occ[def]; dup {
 			continue
 		}
 		byID[p.id] = def
-		occupied[def] = p.id
+		occ[def] = p.id
 	}
 
-	byChord := make(map[KeyChord]*ActionDef, len(byID))
+	editorByChord := make(map[KeyChord]*ActionDef, len(byID))
+	fpByChord := make(map[KeyChord]*ActionDef)
 	for id, c := range byID {
 		if c.isZero() {
 			continue
 		}
-		byChord[c] = actionByID[id]
+		a := actionByID[id]
+		if a.Scope == actionScopeFilePicker {
+			fpByChord[c] = a
+		} else {
+			editorByChord[c] = a
+		}
 	}
-	return byChord, byID
+	return editorByChord, fpByChord, byID
 }
 
 // keybindOverrides 는 기본값과 다른 항목만 뽑아 config.json 에 기록할 맵을 만든다.
@@ -5369,60 +5539,7 @@ type StartupAction struct {
 	ReadOnly bool
 }
 
-func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
-	absPath, err := filepath.Abs(filePath)
-	if err != nil {
-		absPath = filePath
-	}
-
-	// 💡 추가 1: 열려는 대상이 디렉토리일 경우 경고 띄우고 취소
-	if info, err := os.Stat(absPath); err == nil && info.IsDir() {
-		e.promptMode = true
-		e.promptType = "alert"
-		e.alertMessage = fmt.Sprintf("'%s'은(는) 폴더입니다.", filepath.Base(absPath))
-		return
-	}
-
-	// 💡 추가 2: 부모 디렉토리가 존재하지 않을 경우 경고 (일단 열어주긴 함)
-	dir := filepath.Dir(absPath)
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		e.promptMode = true
-		e.promptType = "alert"
-		e.alertMessage = fmt.Sprintf("경고: 디렉토리가 존재하지 않습니다 (%s)", dir)
-	}
-
-	// 1. 이미 열린 탭인지 검사 (Focus & State Update)
-	for i, buf := range e.buffers {
-		if buf.filePath == absPath {
-			e.activeBuffer = i
-			buf.isReadOnly = isReadOnly // 💡 상태 덮어쓰기
-			return
-		}
-	}
-
-	// 💡 failsafe: 대용량 파일 경고
-	fileInfo, errStat := os.Stat(absPath)
-	if errStat == nil && fileInfo.Size() > 50*1024*1024 {
-		if globalScreenHandle != nil && *globalScreenHandle != nil {
-			(*globalScreenHandle).Suspend()
-		}
-		errConfirm := zenity.Question(
-			fmt.Sprintf("파일 크기가 매우 큽니다 (%.1f MB).\n열면 속도가 느려지거나 멈출 수 있습니다. 계속 진행하시겠습니까?", float64(fileInfo.Size())/(1024*1024)),
-			zenity.Title("대용량 파일 경고"),
-			zenity.OKLabel("예"),
-			zenity.CancelLabel("아니오"),
-		)
-		if globalScreenHandle != nil && *globalScreenHandle != nil {
-			(*globalScreenHandle).Resume()
-			(*globalScreenHandle).Sync()
-		}
-		e.needsFullRefresh = true
-		if errConfirm != nil {
-			return
-		}
-	}
-
-	// 2. 새 탭으로 열기
+func (e *Editor) finishOpenOrFocusFile(absPath string, isReadOnly bool) {
 	b := NewBuffer()
 	b.filePath = absPath
 	b.isReadOnly = isReadOnly
@@ -5450,6 +5567,121 @@ func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
 		e.buffers = append(e.buffers, b)
 		e.activeBuffer = len(e.buffers) - 1
 	}
+	e.needsFullRefresh = true
+}
+
+// openOrFocusFileAsync 는 파일을 열거나 이미 열린 탭에 포커스한다.
+// 대용량 파일 확인 대화상자를 띄워 대기해야 하는 경우 true 를 반환하고,
+// 확인/취소 완료 시 onResume 를 호출한다.
+func (e *Editor) openOrFocusFileAsync(filePath string, isReadOnly bool, onResume func()) bool {
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		absPath = filePath
+	}
+
+	// 💡 추가 1: 열려는 대상이 디렉토리일 경우 경고 띄우고 취소
+	if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+		e.promptMode = true
+		e.promptType = "alert"
+		e.alertMessage = Tf("err.is_directory", filepath.Base(absPath))
+		return false
+	}
+
+	// 💡 추가 2: 부모 디렉토리가 존재하지 않을 경우 경고 (일단 열어주긴 함)
+	dir := filepath.Dir(absPath)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		e.promptMode = true
+		e.promptType = "alert"
+		e.alertMessage = Tf("err.no_such_dir", dir)
+	}
+
+	// 1. 이미 열린 탭인지 검사 (Focus & State Update)
+	for i, buf := range e.buffers {
+		if buf.filePath == absPath {
+			e.activeBuffer = i
+			buf.isReadOnly = isReadOnly // 💡 상태 덮어쓰기
+			return false
+		}
+	}
+
+	// 💡 failsafe: 대용량 파일 경고 (순수 TUI 확인 대화상자)
+	fileInfo, errStat := os.Stat(absPath)
+	if errStat == nil && fileInfo.Size() > 50*1024*1024 {
+		e.openConfirmDialog(
+			" "+T("dialog.bigfile.title")+" ",
+			Tf("dialog.bigfile.body", float64(fileInfo.Size())/(1024*1024)),
+			T("dialog.bigfile.ok"),
+			T("dialog.bigfile.cancel"),
+			false,
+			func() {
+				e.finishOpenOrFocusFile(absPath, isReadOnly)
+				if onResume != nil {
+					onResume()
+				}
+			},
+			func() {
+				if onResume != nil {
+					onResume()
+				}
+			},
+		)
+		return true
+	}
+
+	// 2. 새 탭으로 열기
+	e.finishOpenOrFocusFile(absPath, isReadOnly)
+	return false
+}
+
+func (e *Editor) openOrFocusFile(filePath string, isReadOnly bool) {
+	e.openOrFocusFileAsync(filePath, isReadOnly, nil)
+}
+
+// processStartupActions 는 CLI 플래그로 쌓인 시작 액션을 순차 실행한다.
+// 파일 피커(-o)나 대용량 파일 경고처럼 사용자 응답이 필요한 모달이 열리면
+// 실행을 잠시 멈추고, 모달이 닫힐 때 자동으로 남은 큐를 이어서 처리한다.
+func (e *Editor) processStartupActions() {
+	for len(e.startupActions) > 0 {
+		action := e.startupActions[0]
+		e.startupActions = e.startupActions[1:]
+
+		switch action.Type {
+		case "file":
+			if e.openOrFocusFileAsync(action.Path, action.ReadOnly, e.processStartupActions) {
+				return
+			}
+		case "config":
+			e.focusOrOpenConfig(action.ReadOnly)
+		case "picker":
+			ro := action.ReadOnly
+			e.openFilePickerModal(fpModeOpen, "", "", ro,
+				func(filePath string) {
+					if filePath != "" {
+						if e.openOrFocusFileAsync(filePath, ro, e.processStartupActions) {
+							return
+						}
+					}
+					e.processStartupActions()
+				},
+				func() {
+					e.processStartupActions()
+				},
+			)
+			return
+		case "new":
+			b := NewBuffer()
+			b.isReadOnly = action.ReadOnly
+			if !e.initialBufferUsed && len(e.buffers) == 1 && e.buffers[0].filePath == "" && !e.buffers[0].isModified && !e.buffers[0].isConfig {
+				e.buffers[0] = b
+				e.activeBuffer = 0
+				e.initialBufferUsed = true
+			} else {
+				e.buffers = append(e.buffers, b)
+				e.activeBuffer = len(e.buffers) - 1
+			}
+		}
+	}
+	e.needsFullRefresh = true
 }
 
 func (e *Editor) focusOrOpenConfig(isReadOnly bool) {
@@ -5527,7 +5759,7 @@ func main() {
 		case "-n", "--new":
 			actions = append(actions, StartupAction{Type: "new", ReadOnly: currentRO})
 		case "-v", "--version":
-			fmt.Println("jigedit v1.3.2 - A Sane Editor For The Sane People")
+			fmt.Println("jigedit v1.5.0 - A Sane Editor For The Sane People")
 			os.Exit(0)
 		case "-h", "--help":
 			fmt.Println("Usage: jigedit [FLAGS] [FILENAME]")
@@ -5574,6 +5806,7 @@ func main() {
 	defer s.Fini()
 
 	s.EnableMouse(tcell.MouseMotionEvents)
+	s.EnablePaste()
 	globalScreenHandle = &s
 	editor := NewEditor()
 	defer editor.fileWatcher.Close()
@@ -5583,34 +5816,8 @@ func main() {
 		w, _ := s.Size()
 		// 파일 픽커가 뜨기 전에 에디터 껍데기를 먼저 그려줍니다.
 		editor.getActive().generateVisualLines(w, editor.cfg)
-		editor.draw(s) // 🟢 cachedVLines 인자 제거
-
-		for _, action := range actions {
-			if action.Type == "file" {
-				editor.openOrFocusFile(action.Path, action.ReadOnly)
-			} else if action.Type == "config" {
-				editor.focusOrOpenConfig(action.ReadOnly)
-			} else if action.Type == "picker" {
-				s.Suspend()
-				filePath, err := zenity.SelectFile(zenity.Title("파일 열기"))
-				s.Resume()
-				s.Sync()
-				if err == nil && filePath != "" {
-					editor.openOrFocusFile(filePath, action.ReadOnly)
-				}
-			} else if action.Type == "new" { // 💡 여기서부터 추가됨
-				b := NewBuffer()
-				b.isReadOnly = action.ReadOnly
-				if !editor.initialBufferUsed && len(editor.buffers) == 1 && editor.buffers[0].filePath == "" && !editor.buffers[0].isModified && !editor.buffers[0].isConfig {
-					editor.buffers[0] = b
-					editor.activeBuffer = 0
-					editor.initialBufferUsed = true
-				} else {
-					editor.buffers = append(editor.buffers, b)
-					editor.activeBuffer = len(editor.buffers) - 1
-				}
-			}
-		}
+		editor.startupActions = actions
+		editor.processStartupActions()
 		editor.needsFullRefresh = true
 	}
 
@@ -5633,7 +5840,7 @@ func main() {
 			needsLayout = false
 		}
 
-		if snapToCursor && !editor.paletteActive && !editor.ctxMenuActive && !editor.encodeMenuActive && !currentScreen.HasPendingEvent() {
+		if snapToCursor && !editor.paletteActive && !editor.ctxMenuActive && !editor.encodeMenuActive && !editor.langMenuActive && editor.filePicker == nil && editor.confirmDialog == nil && !currentScreen.HasPendingEvent() {
 			b.scrollToCursorV(editor.cfg, h-editor.tabHeight-1)
 			textMaxWidth := w - b.getLineNumWidth(editor.cfg)
 
@@ -5655,7 +5862,23 @@ func main() {
 			needsLayout = true
 			snapToCursor = true
 			editor.needsFullRefresh = true
+		case *tcell.EventPaste:
+			if changed, snap := editor.handlePasteEvent(ev); changed {
+				needsLayout = true
+				if snap {
+					snapToCursor = true
+				}
+			}
+			continue
 		case *tcell.EventInterrupt:
+			if pEv, ok := ev.Data().(pickerDirChangedEvent); ok {
+				if editor.filePicker != nil && filepath.Clean(editor.filePicker.currentDir) == pEv.dir {
+					editor.filePicker.refreshDirKeepState()
+					editor.needsFullRefresh = true
+					needsLayout = true
+				}
+				continue
+			}
 			filePath, ok := ev.Data().(string)
 			if ok {
 				// 💡 [안전장치 아키텍처]: 가변 슬라이스의 루프 인덱스 직접 참조를 폐기하고 안전하게 스냅샷 참조
@@ -5759,7 +5982,19 @@ func main() {
 				lastClickX, lastClickY = mx, my
 			}
 
-			if (buttons&tcell.Button3 != 0 || buttons&tcell.Button2 != 0) && !editor.paletteActive && !editor.keyMenuActive {
+			if editor.confirmDialog != nil {
+				editor.handleConfirmMouse(mx, my, isNewPress, mouseMoved)
+				needsLayout = true
+				continue
+			}
+
+			if editor.filePicker != nil {
+				editor.handleFilePickerMouse(mx, my, buttons, isNewPress, isDrag, isWheel, mouseMoved, &clickCount)
+				needsLayout = true
+				continue
+			}
+
+			if (buttons&tcell.Button3 != 0 || buttons&tcell.Button2 != 0) && !editor.paletteActive && !editor.keyMenuActive && !editor.langMenuActive {
 				// 💡 우클릭 시 우클릭한 위치로 커서(I-빔) 이동
 				if my >= editor.tabHeight && my < h-1 {
 					loc := b.screenToMemoryPosV(mx, my, editor.tabHeight, editor.cfg)
@@ -6053,7 +6288,7 @@ func main() {
 				if !b.gotoMode && my == h-1 && isNewPress {
 					// 💡 토글 시 재검색 + 가장 가까운 곳으로 즉시 점프하는 함수
 					doSearchJump := func() {
-						b.findAllMatches(editor.cfg.OverlapSearch)
+						b.findAllMatches()
 						if len(b.matches) > 0 {
 							b.matchIdx = b.findInitialMatchIdx(b.cursor, false)
 							b.jumpToMatch()
@@ -6224,6 +6459,35 @@ func main() {
 				if my == h-1 || b.isInputSelect {
 					continue
 				}
+			}
+
+			if editor.langMenuActive {
+				if mx >= editor.langMenuX && mx < editor.langMenuX+editor.langMenuW && my >= editor.langMenuY && my < editor.langMenuY+editor.langMenuH {
+					visibleItems := editor.langMenuH - 2
+					clickIdx := my - editor.langMenuY - 1
+					if clickIdx >= 0 && clickIdx < visibleItems {
+						targetItemIdx := editor.menuScrollOffset + clickIdx
+						if targetItemIdx >= 0 && targetItemIdx < len(editor.langMenuItems) {
+							if mouseMoved {
+								editor.langMenuCursor = targetItemIdx
+								needsLayout = true
+							}
+							if isNewPress {
+								editor.langMenuCursor = targetItemIdx
+								action := editor.langMenuItems[editor.langMenuCursor].Action
+								editor.langMenuActive = false
+								if action != nil {
+									action(editor, currentScreen)
+								}
+								needsLayout = true
+							}
+						}
+					}
+				} else if isNewPress {
+					editor.langMenuActive = false
+					needsLayout = true
+				}
+				continue
 			}
 
 			if editor.paletteActive {
@@ -6528,6 +6792,11 @@ func main() {
 				}
 			}
 		case *tcell.EventKey:
+			if editor.inBracketedPaste {
+				editor.handleBracketedPasteKey(ev)
+				continue
+			}
+
 			// ponytail: reset horizontal target memory on any key EXCEPT vertical movement
 			b := editor.getActive()
 			k := ev.Key()
@@ -6545,6 +6814,20 @@ func main() {
 
 			if ev.Key() != tcell.KeyEnd {
 				b.stickToWrapEnd = false
+			}
+
+			if editor.confirmDialog != nil {
+				snapToCursor = false
+				editor.handleConfirmKey(ev)
+				needsLayout = true
+				continue
+			}
+
+			if editor.filePicker != nil {
+				snapToCursor = false
+				editor.handleFilePickerKey(ev)
+				needsLayout = true
+				continue
 			}
 
 			// 💡 PreModal 액션(탭 전환)은 팔레트/검색창/프롬프트가 열려 있어도 동작한다.
@@ -6670,6 +6953,38 @@ func main() {
 						snapToCursor = true
 					}
 				}
+				continue
+			}
+
+			if editor.langMenuActive {
+				snapToCursor = false
+				switch ev.Key() {
+				case tcell.KeyEscape:
+					editor.langMenuActive = false
+				case tcell.KeyUp:
+					editor.langMenuCursor--
+					if editor.langMenuCursor < 0 {
+						editor.langMenuCursor = len(editor.langMenuItems) - 1
+					}
+				case tcell.KeyDown:
+					editor.langMenuCursor++
+					if editor.langMenuCursor >= len(editor.langMenuItems) {
+						editor.langMenuCursor = 0
+					}
+				case tcell.KeyEnter:
+					if editor.langMenuCursor >= 0 && editor.langMenuCursor < len(editor.langMenuItems) {
+						action := editor.langMenuItems[editor.langMenuCursor].Action
+						editor.langMenuActive = false
+						if action != nil {
+							action(editor, currentScreen)
+						}
+					}
+				case tcell.KeyRune:
+					if idx := getMenuJumpIdx(editor.langMenuItems, ev.Rune(), editor.langMenuCursor); idx != -1 {
+						editor.langMenuCursor = idx
+					}
+				}
+				needsLayout = true
 				continue
 			}
 
@@ -6965,17 +7280,17 @@ func main() {
 					}
 					if ev.Key() == tcell.KeyCtrlC {
 						if hasSel {
-							clipboard.WriteAll(string((*targetStr)[selStart:selEnd]))
+							globalClipboard.Write(currentScreen, string((*targetStr)[selStart:selEnd]))
 						} else {
 							text := b.getSelectedText()
 							if text != "" {
-								_ = clipboard.WriteAll(text)
+								globalClipboard.Write(currentScreen, text)
 							}
 						}
 						continue
 					}
 					if ev.Key() == tcell.KeyCtrlX && hasSel {
-						clipboard.WriteAll(string((*targetStr)[selStart:selEnd]))
+						globalClipboard.Write(currentScreen, string((*targetStr)[selStart:selEnd]))
 						deleteInputSel()
 						if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
 							b.matches = nil
@@ -6985,19 +7300,7 @@ func main() {
 						continue
 					}
 					if ev.Key() == tcell.KeyCtrlV {
-						text, err := clipboard.ReadAll()
-						if err == nil && text != "" {
-							deleteInputSel()
-							text = strings.ReplaceAll(text, "\r\n", " ")
-							text = strings.ReplaceAll(text, "\n", " ")
-							text = strings.ReplaceAll(text, "\r", "")
-							runes := []rune(text)
-							*targetStr = append((*targetStr)[:b.inputCX], append(runes, (*targetStr)[b.inputCX:]...)...)
-							b.inputCX += len(runes)
-							if b.searchMode && (!b.isReplace || b.replaceStep == 1) {
-								b.matches = nil
-								b.matchIdx = -1
-							}
+						if editor.pasteIntoSearchOrGoto(globalClipboard.ReadSync()) {
 							needsLayout = true
 						}
 						continue
@@ -7168,7 +7471,7 @@ func main() {
 					}
 					if ev.Key() == tcell.KeyEnter {
 						if b.searchMode && (!b.isReplace || b.replaceStep == 1) && b.matchIdx == -1 {
-							b.findAllMatches(editor.cfg.OverlapSearch)
+							b.findAllMatches()
 							if len(b.matches) > 0 {
 								b.matchIdx = b.findInitialMatchIdx(b.cursor, isShift)
 								b.jumpToMatch()
@@ -7198,14 +7501,14 @@ func main() {
 									}
 								} else if b.replaceStep == 2 {
 									b.replaceStep = 3
-									b.findAllMatches(editor.cfg.OverlapSearch)
+									b.findAllMatches()
 									if len(b.matches) > 0 {
 										b.matchIdx = b.findInitialMatchIdx(b.cursor, false)
 										b.jumpToMatch()
 										snapToCursor = true
 									}
 								} else if b.replaceStep == 3 {
-									b.replaceCurrent(editor.cfg.OverlapSearch)
+									b.replaceCurrent()
 									needsLayout = true
 									snapToCursor = true
 								}
